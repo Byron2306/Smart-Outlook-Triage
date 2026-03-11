@@ -1,0 +1,5 @@
+{
+  "name": "Smart Outlook Triage",
+  "description": "An intelligent email management tool designed to sort, categorize, and draft responses for Outlook Live using Gemini AI.",
+  "requestFramePermissions": []
+}
