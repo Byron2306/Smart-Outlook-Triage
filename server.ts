@@ -6,6 +6,7 @@ import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
 import { OutlookAgent } from "./src/agent/agent.js";
+import { loadProfile, saveProfile, loadContacts, loadMemory } from "./src/knowledge/profile.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,14 +54,46 @@ async function startServer() {
     });
   });
 
-  app.post("/api/agent/start", async (_req, res) => {
+  // --- Browser Lifecycle ---
+
+  app.post("/api/agent/start", async (req, res) => {
     try {
-      await agent.start();
-      res.json({ success: true, message: "Agent started" });
+      const headless = req.body.headless !== false;
+      await agent.start(headless);
+      res.json({ success: true, message: `Agent started (${headless ? "headless" : "headed"})` });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   });
+
+  app.post("/api/agent/start-headed", async (_req, res) => {
+    try {
+      await agent.startHeaded();
+      res.json({ success: true, message: "Agent started in headed mode — you can see the browser" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/switch-headless", async (_req, res) => {
+    try {
+      await agent.switchToHeadless();
+      res.json({ success: true, message: "Switched to headless mode" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/switch-headed", async (_req, res) => {
+    try {
+      await agent.switchToHeaded();
+      res.json({ success: true, message: "Switched to headed mode" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Auth ---
 
   app.post("/api/agent/login", async (req, res) => {
     const { email, password } = req.body;
@@ -69,7 +102,7 @@ async function startServer() {
     }
     try {
       const success = await agent.login(email, password);
-      res.json({ success, message: success ? "Logged in" : "Login failed - check credentials or 2FA" });
+      res.json({ success, message: success ? "Logged in" : "Login may have been blocked — try headed mode" });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -84,6 +117,8 @@ async function startServer() {
     }
   });
 
+  // --- Actions ---
+
   app.post("/api/agent/action", async (req, res) => {
     const { action, params } = req.body;
     if (!action) {
@@ -96,6 +131,8 @@ async function startServer() {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // --- Autonomous Agent ---
 
   app.post("/api/agent/run", async (req, res) => {
     const { goal } = req.body;
@@ -112,6 +149,8 @@ async function startServer() {
     agent.stop();
     res.json({ success: true, message: "Agent stopped" });
   });
+
+  // --- State ---
 
   app.get("/api/agent/state", (_req, res) => {
     res.json(agent.getState());
@@ -135,6 +174,48 @@ async function startServer() {
     res.json({ success: true, message: "Agent shut down" });
   });
 
+  // --- Profile & Knowledge ---
+
+  app.get("/api/profile", async (_req, res) => {
+    try {
+      const p = await loadProfile();
+      res.json(p);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/profile", async (req, res) => {
+    try {
+      const current = await loadProfile();
+      const updated = { ...current, ...req.body };
+      await saveProfile(updated);
+      res.json(updated);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/contacts", async (_req, res) => {
+    try {
+      res.json(await loadContacts());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/memory", async (req, res) => {
+    try {
+      const entries = await loadMemory();
+      const limit = parseInt(req.query.limit as string) || 50;
+      res.json(entries.slice(-limit));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Vite ---
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -149,8 +230,9 @@ async function startServer() {
   }
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Outlook Agent running on http://localhost:${PORT}`);
-    console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
+    console.log(`\nOutlook Browser Agent running on http://localhost:${PORT}`);
+    console.log(`WebSocket: ws://localhost:${PORT}/ws`);
+    console.log(`PinchTab: pinchtab (v0.7.8) available globally\n`);
   });
 }
 

@@ -1,42 +1,51 @@
 # Outlook Browser Agent
 
-An agentic email automation tool that controls Outlook through **real browser automation** (Playwright) — no OAuth app registration, no Microsoft Graph API, no client secrets. It logs into Outlook the same way you do: through the browser.
+A personal AI agent that controls Outlook through **real browser automation** (Playwright) — no OAuth app registration, no Microsoft Graph API, no client secrets. It logs into Outlook the same way you do: through the browser.
 
-## How It Works
+This isn't just an email automator. It **understands who you are**, knows your work context, fetches research papers, builds memory from past interactions, and can even fill out basic documents.
+
+## How It Gets Past OAuth
+
+Microsoft blocks most Playwright scripts because they detect automation signals (`navigator.webdriver`, missing browser plugins, headless fingerprints, etc.). This project handles that through:
+
+1. **Persistent browser profile** (`launchPersistentContext`) — maintains a real Chrome user data directory with all cookies, localStorage, IndexedDB, and service workers. This is fundamentally different from `storageState` which only saves cookies.
+
+2. **Stealth injection** — strips `navigator.webdriver`, fakes Chrome plugin objects, spoofs WebGL vendor strings, and patches the permissions API. Microsoft's login page sees a normal browser.
+
+3. **Headed first login** — the first time, you launch in **headed mode** (visible browser window). You log in manually, handle any 2FA/CAPTCHA yourself. The session gets persisted to disk. After that, headless works.
+
+4. **Human-like interaction** — typing delays, natural wait times, and real DOM events instead of direct API calls.
+
+**The key insight**: once you've logged in once with a real browser profile and saved it, subsequent launches (even headless) carry the full authentication state. This is how OpenClaw's "clippy" skill works too.
+
+## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│           Web Dashboard (React)             │
-│  Login · Quick Actions · Autonomous Agent   │
-└─────────────────┬───────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│              Web Dashboard (React)               │
+│  Profile · Login · Agent · Research · Memory     │
+└─────────────────┬────────────────────────────────┘
                   │ REST + WebSocket
-┌─────────────────┴───────────────────────────┐
-│           Express Server                    │
-│  Agent API · Screenshot · Real-time Logs    │
-└─────────────────┬───────────────────────────┘
+┌─────────────────┴────────────────────────────────┐
+│              Express Server                      │
+│  Agent API · Profile API · Screenshot · WS       │
+└─────────────────┬────────────────────────────────┘
                   │
-┌─────────────────┴───────────────────────────┐
-│         Outlook Agent (Agentic Loop)        │
-│  Gemini AI decides actions → Playwright     │
-│  executes them → observes results → repeat  │
-└─────────────────┬───────────────────────────┘
+┌─────────────────┴────────────────────────────────┐
+│           Outlook Agent (Agentic Loop)           │
+│  Gemini AI observes → decides → executes →       │
+│  remembers → repeats                             │
+├──────────────────────────────────────────────────┤
+│  Knowledge Layer                                 │
+│  Profile · Contacts · Memory · Research Papers   │
+└─────────────────┬────────────────────────────────┘
                   │
-┌─────────────────┴───────────────────────────┐
-│      Playwright (Headless Chromium)         │
-│  Real browser session · Persisted cookies   │
-│  outlook.live.com / outlook.office.com      │
-└─────────────────────────────────────────────┘
+┌─────────────────┴────────────────────────────────┐
+│   Playwright (Persistent Chromium Profile)       │
+│   + PinchTab (accessibility-tree snapshots)      │
+│   outlook.live.com / outlook.office.com          │
+└──────────────────────────────────────────────────┘
 ```
-
-### Why Browser Automation Instead of OAuth?
-
-| Approach | OAuth + Graph API | Browser Automation (this project) |
-|----------|-------------------|-----------------------------------|
-| Setup | Register Azure AD app, configure secrets, handle token refresh | Just provide your email & password |
-| Permissions | Requires admin consent for org accounts | Uses your existing access |
-| 2FA | Complex to handle programmatically | Can handle via saved browser session |
-| Maintenance | API changes, token expiry | Works as long as Outlook web works |
-| Inspiration | — | OpenClaw's "clippy" skill, PinchTab |
 
 ## Quick Start
 
@@ -44,105 +53,128 @@ An agentic email automation tool that controls Outlook through **real browser au
 # 1. Install dependencies
 npm install
 
-# 2. Install Playwright's Chromium
+# 2. Install browsers
 npm run install-browsers
 
-# 3. Set your Gemini API key (optional, for AI features)
+# 3. Set your Gemini API key (optional but recommended)
 cp env.example .env
-# Edit .env and add your GEMINI_API_KEY
+# Edit .env and add GEMINI_API_KEY
 
 # 4. Start the server
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser.
+Open `http://localhost:3000` and:
+1. Click **Headed** to launch a visible browser
+2. Click **Auto Login** or navigate manually to log into Outlook
+3. Once logged in, click **Hide Browser** to switch to headless
+4. The session persists across restarts
 
 ## Features
 
-### Manual Control (Quick Actions)
-- **Get Emails** — Read the visible email list from Outlook
-- **Open/Read Email** — Click on and extract an email's content
-- **Compose & Send** — Write and send new emails
-- **Reply** — Reply to the currently open email
-- **Scroll** — Navigate through the email list
-- **Search** — Find specific emails
-- **Move to Folder** — Organize emails into folders
-- **Delete / Mark Read** — Email management
-- **Screenshot** — See what the browser currently looks like
+### Personal Context (Profile Tab)
+The agent knows you:
+- **Who you are**: name, role, organization, department
+- **What you do**: expertise, current projects, bio
+- **How you communicate**: preferred tone, sign-off style
+- **Your inbox structure**: custom folder names
 
-### AI-Powered (requires Gemini API key)
-- **Classify Email** — AI categorizes the open email by priority and folder
-- **Draft Reply** — AI generates a professional reply draft
-- **Summarize Inbox** — AI summarizes your visible emails with priorities
+Every AI operation uses this context — classification considers your work, drafts match your voice, summaries prioritize what matters to you.
+
+### Situational Awareness (Memory Tab)
+The agent remembers:
+- Emails it has read and their context
+- Decisions it has made
+- Research it has done
+- Contacts it has learned about
+
+Memory persists across sessions and is used to provide context for future interactions. When you get a follow-up email, the agent connects it to previous threads.
+
+### Research Papers
+Search Semantic Scholar directly from the dashboard:
+- Find papers by topic, author, or keyword
+- View abstracts, citation counts, venues
+- Access open-access PDFs
+- The autonomous agent can search papers as part of a goal
+
+### Document Filling
+The agent can analyze forms and documents visible in the browser and suggest field values based on your profile. It uses your stored personal information to auto-fill name, email, student number, department, etc.
 
 ### Autonomous Agent
-Give the agent a natural-language goal like:
-- *"Read my 5 newest emails and summarize them"*
-- *"Find emails from the dean and draft replies"*
-- *"Classify all unread emails and move them to appropriate folders"*
+Natural language goals that leverage all capabilities:
+- *"Read my unread emails, classify them by priority, and summarize what I need to do today"*
+- *"Find the email from Dr. Smith about the extension deadline and draft a reply"*
+- *"Search for papers on transformer architectures and save the key findings"*
+- *"Go to the registration form and fill it out with my details"*
 
-The AI agent will:
-1. Observe the current page state
-2. Decide the best next action
-3. Execute it via Playwright
-4. Repeat until the goal is achieved
+### Manual Control
+Full set of quick actions for direct control:
+- Get/read/compose/reply/send emails
+- Navigate folders, scroll, search
+- Classify, draft, analyze context
+- Screenshot, page text, form filling
 
-## Architecture
+## PinchTab Integration
+
+[PinchTab](https://pinchtab.com) (v0.7.8) is installed globally and available as a standalone tool for other agents. It provides:
+- **Accessibility-tree snapshots** (~1-3K tokens vs 10K+ for screenshots)
+- **Direct browser actions** via HTTP API (click, type, fill, scroll)
+- **Multi-tab management** with session persistence
+- **Stealth mode** to bypass bot detection
+
+```bash
+# Start PinchTab server (for other agents)
+pinchtab --stealth --port 9867
+
+# Use via HTTP API
+curl http://localhost:9867/snapshot
+curl -X POST http://localhost:9867/navigate -d '{"url":"https://outlook.live.com"}'
+```
+
+A TypeScript wrapper is available at `src/agent/pinchtab.ts` for programmatic use.
+
+## Project Structure
 
 ```
 src/
 ├── agent/
-│   ├── browser.ts    # Playwright browser lifecycle + session persistence
-│   ├── outlook.ts    # Outlook-specific selectors and automation actions
-│   └── agent.ts      # Agentic orchestrator (manual + autonomous modes)
+│   ├── browser.ts     # Playwright: persistent context, stealth, headed/headless
+│   ├── outlook.ts     # Outlook selectors and browser automation actions
+│   ├── agent.ts       # Agentic orchestrator with 20+ actions
+│   └── pinchtab.ts    # PinchTab HTTP API wrapper
 ├── ai/
-│   └── gemini.ts     # Gemini AI: classify, draft, summarize, decide
-├── components/       # (reserved for future component extraction)
-├── App.tsx           # React dashboard UI
-├── main.tsx          # React entry point
-└── index.css         # Tailwind + custom styles
+│   └── gemini.ts      # Context-aware AI: classify, draft, analyze, decide
+├── knowledge/
+│   ├── profile.ts     # User profile, contacts, persistent memory
+│   └── research.ts    # Semantic Scholar API, web presence scouting
+├── App.tsx            # React dashboard (6 tabs)
+├── main.tsx           # Entry point
+└── index.css          # Tailwind styles
 
-server.ts             # Express + WebSocket server, agent API endpoints
+server.ts              # Express + WebSocket server
+agent-data/            # Persisted profile, contacts, memory (gitignored)
+browser-profile/       # Chromium user data directory (gitignored)
 ```
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/agent/start` | Launch the headless browser |
-| POST | `/api/agent/login` | Login with email & password |
-| POST | `/api/agent/check-session` | Check if session is still active |
-| POST | `/api/agent/action` | Execute a single action |
-| POST | `/api/agent/run` | Start autonomous agent with a goal |
-| POST | `/api/agent/stop` | Stop the autonomous agent |
-| GET | `/api/agent/state` | Get current agent state |
-| GET | `/api/agent/screenshot` | Get browser screenshot (JPEG) |
-| POST | `/api/agent/shutdown` | Close browser and clean up |
-| WS | `/ws` | Real-time logs and state updates |
-
-## PinchTab & OpenClaw Comparison
-
-This project was inspired by research into existing browser automation tools:
-
-- **PinchTab**: A Go binary that provides browser control via HTTP API using accessibility-tree snapshots. Token-efficient (~1-3K tokens vs 10K+ for screenshots). We use a similar approach with Playwright's `ariaSnapshot()`.
-
-- **OpenClaw (Clawbot)**: Their "clippy" skill automates Outlook via Playwright without OAuth — exactly the approach used here. Their browser relay method uses a Chrome extension for AI agent control.
-
-This project gives you the same capabilities as both tools, but as a single self-contained Node.js app with a built-in web dashboard.
-
-## Session Persistence
-
-Browser sessions (cookies, local storage) are saved to `playwright-session/` automatically. This means:
-- You only need to log in once
-- The session survives server restarts
-- 2FA prompts are handled once, then the session is reused
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | For AI features | Google Gemini API key ([get one free](https://aistudio.google.com/apikey)) |
+| `GEMINI_API_KEY` | For AI features | [Get one free](https://aistudio.google.com/apikey) |
 | `PORT` | No | Server port (default: 3000) |
+
+## How This Compares
+
+| Feature | This Project | PinchTab | OpenClaw Clippy |
+|---------|-------------|----------|-----------------|
+| OAuth needed | No | No | No |
+| Browser automation | Playwright | Go + Chrome DevTools | Playwright |
+| AI integration | Gemini (built-in) | External | External |
+| Personal context | Full profile + memory | None | None |
+| Research papers | Semantic Scholar API | None | None |
+| Document filling | Yes | Manual | No |
+| Web dashboard | Yes | CLI only | No |
+| Session persistence | Full Chrome profile | Cookies | Cookies |
 
 ## License
 
