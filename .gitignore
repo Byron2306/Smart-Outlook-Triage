@@ -1,0 +1,9 @@
+node_modules/
+dist/
+playwright-session/
+browser-profile/
+agent-data/
+.env
+.env.local
+*.log
+smoketest_results.json

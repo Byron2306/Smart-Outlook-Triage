@@ -1,185 +1,269 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import session from "express-session";
-import cookieParser from "cookie-parser";
-import axios from "axios";
+import { WebSocketServer, WebSocket } from "ws";
+import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-
-// Extend express-session
-declare module "express-session" {
-  interface SessionData {
-    accessToken: string;
-  }
-}
+import { OutlookAgent } from "./src/agent/agent.js";
+import { loadProfile, saveProfile, loadContacts, loadMemory } from "./src/knowledge/profile.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "3000");
 
-  app.use(express.json());
-  app.use(cookieParser());
-  app.use(
-    session({
-      secret: process.env.SESSION_SECRET || "a-very-secret-key",
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: true,
-        sameSite: "none",
-        httpOnly: true,
-      },
-    })
-  );
+  app.use(express.json({ limit: "10mb" }));
 
-  // --- OAuth Configuration ---
-  const CLIENT_ID = process.env.MS_CLIENT_ID;
-  const CLIENT_SECRET = process.env.MS_CLIENT_SECRET;
-  const REDIRECT_URI = `${process.env.APP_URL}/auth/callback`;
-  const AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
-  const TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
-  const SCOPES = "openid profile email User.Read Mail.Read Mail.ReadWrite Mail.Send";
+  const server = http.createServer(app);
 
-  // --- API Routes ---
+  const dashboardWss = new WebSocketServer({ noServer: true });
+  const extensionWss = new WebSocketServer({ noServer: true });
 
-  app.get("/api/auth/url", (req, res) => {
-    if (!CLIENT_ID) {
-      return res.status(500).json({ error: "MS_CLIENT_ID not configured" });
+  server.on("upgrade", (request, socket, head) => {
+    const pathname = new URL(request.url!, `http://${request.headers.host}`).pathname;
+    if (pathname === "/ws") {
+      dashboardWss.handleUpgrade(request, socket, head, (ws) => {
+        dashboardWss.emit("connection", ws, request);
+      });
+    } else if (pathname === "/ext") {
+      extensionWss.handleUpgrade(request, socket, head, (ws) => {
+        extensionWss.emit("connection", ws, request);
+      });
+    } else {
+      socket.destroy();
     }
-    const params = new URLSearchParams({
-      client_id: CLIENT_ID,
-      response_type: "code",
-      redirect_uri: REDIRECT_URI,
-      response_mode: "query",
-      scope: SCOPES,
-      state: "12345",
-    });
-    res.json({ url: `${AUTH_URL}?${params.toString()}` });
   });
 
-  app.get("/auth/callback", async (req, res) => {
-    const { code } = req.query;
-    if (!code) {
-      return res.status(400).send("No code provided");
-    }
+  const agent = new OutlookAgent();
+  const dashboardClients = new Set<WebSocket>();
+  const extensionClients = new Set<WebSocket>();
 
-    try {
-      const response = await axios.post(
-        TOKEN_URL,
-        new URLSearchParams({
-          client_id: CLIENT_ID!,
-          client_secret: CLIENT_SECRET!,
-          code: code as string,
-          redirect_uri: REDIRECT_URI,
-          grant_type: "authorization_code",
-        }).toString(),
-        {
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
+  function broadcast(type: string, data: any) {
+    const msg = JSON.stringify({ type, data, timestamp: Date.now() });
+    for (const ws of dashboardClients) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+    }
+  }
+
+  agent.on("log", (log) => broadcast("log", log));
+  agent.on("state", (state) => broadcast("state", state));
+
+  // --- Dashboard WebSocket ---
+
+  dashboardWss.on("connection", (ws) => {
+    dashboardClients.add(ws);
+    ws.send(JSON.stringify({ type: "state", data: agent.getState(), timestamp: Date.now() }));
+    ws.on("close", () => dashboardClients.delete(ws));
+    ws.on("message", async (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "action") {
+          const result = await agent.executeAction(msg.action, msg.params);
+          ws.send(JSON.stringify({ type: "action_result", action: msg.action, data: result, timestamp: Date.now() }));
         }
-      );
-
-      const { access_token, refresh_token } = response.data;
-      req.session.accessToken = access_token;
-      
-      res.send(`
-        <html>
-          <body>
-            <script>
-              if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-                window.close();
-              } else {
-                window.location.href = '/';
-              }
-            </script>
-            <p>Authentication successful. This window should close automatically.</p>
-          </body>
-        </html>
-      `);
-    } catch (error: any) {
-      console.error("Token exchange error:", error.response?.data || error.message);
-      res.status(500).send("Authentication failed");
-    }
+      } catch (err: any) {
+        ws.send(JSON.stringify({ type: "error", data: err.message, timestamp: Date.now() }));
+      }
+    });
   });
 
-  app.get("/api/user/me", async (req, res) => {
-    const token = req.session.accessToken;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
+  // --- Extension WebSocket ---
 
-    try {
-      const response = await axios.get("https://graph.microsoft.com/v1.0/me", {
-        headers: { Authorization: `Bearer ${token}` },
+  extensionWss.on("connection", (ws) => {
+    extensionClients.add(ws);
+    broadcast("log", {
+      timestamp: new Date().toISOString(),
+      type: "info",
+      message: "Chrome extension connected",
+    });
+
+    ws.on("close", () => {
+      extensionClients.delete(ws);
+      broadcast("log", {
+        timestamp: new Date().toISOString(),
+        type: "info",
+        message: "Chrome extension disconnected",
       });
-      res.json(response.data);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch user info" });
-    }
+    });
+
+    ws.on("message", async (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "page_data") {
+          broadcast("log", {
+            timestamp: new Date().toISOString(),
+            type: "info",
+            message: `Extension heartbeat: ${msg.data?.url}`,
+          });
+        } else if (msg.type === "action_result") {
+          broadcast("log", {
+            timestamp: new Date().toISOString(),
+            type: "result",
+            message: `Extension result for ${msg.action}`,
+            data: msg.data,
+          });
+        }
+      } catch {}
+    });
   });
 
-  app.get("/api/mail/folders", async (req, res) => {
-    const token = req.session.accessToken;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
+  // --- Browser Connection ---
 
+  app.post("/api/agent/connect-cdp", async (req, res) => {
+    const cdpUrl = req.body.cdpUrl || "http://127.0.0.1:9222";
     try {
-      const response = await axios.get("https://graph.microsoft.com/v1.0/me/mailFolders", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      res.json(response.data.value);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch folders" });
+      await agent.connectCDP(cdpUrl);
+      res.json({ success: true, message: `Connected to Chrome at ${cdpUrl}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.post("/api/mail/folders/create", async (req, res) => {
-    const token = req.session.accessToken;
-    const { displayName } = req.body;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  app.post("/api/agent/diagnose-cdp", async (req, res) => {
+    const cdpUrl = req.body.cdpUrl || "http://127.0.0.1:9222";
     try {
-      const response = await axios.post(
-        "https://graph.microsoft.com/v1.0/me/mailFolders",
-        { displayName },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      res.json(response.data);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to create folder" });
+      const result = await agent.diagnoseCDP(cdpUrl);
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.get("/api/mail/messages", async (req, res) => {
-    const token = req.session.accessToken;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  app.post("/api/agent/start", async (req, res) => {
     try {
-      const response = await axios.get(
-        "https://graph.microsoft.com/v1.0/me/messages?$top=10&$select=subject,from,receivedDateTime,bodyPreview,id",
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      res.json(response.data.value);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch messages" });
+      const headless = req.body.headless !== false;
+      await agent.start(headless);
+      res.json({ success: true, message: `Agent started (${headless ? "headless" : "headed"})` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.post("/api/reports/save", async (req, res) => {
-    const { report } = req.body;
+  app.post("/api/agent/start-headed", async (_req, res) => {
     try {
-      const fs = await import("fs/promises");
-      await fs.writeFile("smoketest_results.json", JSON.stringify(report, null, 2));
-      res.json({ success: true, message: "Report saved to smoketest_results.json" });
-    } catch (error) {
-      console.error("Failed to save report:", error);
-      res.status(500).json({ error: "Failed to save report" });
+      await agent.startHeaded();
+      res.json({ success: true, message: "Agent started in headed mode" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  // --- Vite Middleware ---
+  app.post("/api/agent/switch-headless", async (_req, res) => {
+    try {
+      await agent.switchToHeadless();
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/switch-headed", async (_req, res) => {
+    try {
+      await agent.switchToHeaded();
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Auth ---
+
+  app.post("/api/agent/login", async (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+    try {
+      const success = await agent.login(email, password);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/check-session", async (_req, res) => {
+    try {
+      const loggedIn = await agent.checkSession();
+      res.json({ loggedIn });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Actions ---
+
+  app.post("/api/agent/action", async (req, res) => {
+    const { action, params } = req.body;
+    if (!action) return res.status(400).json({ error: "Action required" });
+    try {
+      const result = await agent.executeAction(action, params);
+      res.json({ success: true, result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/run", async (req, res) => {
+    const { goal } = req.body;
+    if (!goal) return res.status(400).json({ error: "Goal required" });
+    res.json({ success: true, message: `Started: ${goal}` });
+    agent.runAutonomous(goal).catch((err) => broadcast("error", { message: err.message }));
+  });
+
+  app.post("/api/agent/stop", async (_req, res) => {
+    agent.stop();
+    res.json({ success: true });
+  });
+
+  app.get("/api/agent/state", (_req, res) => res.json(agent.getState()));
+
+  app.get("/api/agent/screenshot", async (_req, res) => {
+    try {
+      const buf = await agent.getScreenshot();
+      if (buf) res.type("image/jpeg").send(buf);
+      else res.status(404).json({ error: "No screenshot" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/shutdown", async (_req, res) => {
+    await agent.shutdown();
+    res.json({ success: true });
+  });
+
+  // --- Profile & Knowledge ---
+
+  app.get("/api/profile", async (_req, res) => {
+    try { res.json(await loadProfile()); }
+    catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.post("/api/profile", async (req, res) => {
+    try {
+      const current = await loadProfile();
+      const updated = { ...current, ...req.body };
+      await saveProfile(updated);
+      res.json(updated);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get("/api/contacts", async (_req, res) => {
+    try { res.json(await loadContacts()); }
+    catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  app.get("/api/memory", async (req, res) => {
+    try {
+      const entries = await loadMemory();
+      const limit = parseInt(req.query.limit as string) || 50;
+      res.json(entries.slice(-limit));
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // --- Vite ---
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -188,13 +272,30 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(__dirname, "dist", "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`
+┌─────────────────────────────────────────────────┐
+│          Outlook Browser Agent                  │
+├─────────────────────────────────────────────────┤
+│  Dashboard:  http://localhost:${PORT}              │
+│  WebSocket:  ws://localhost:${PORT}/ws              │
+│  Extension:  ws://localhost:${PORT}/ext             │
+│  PinchTab:   pinchtab (v0.7.8) available        │
+├─────────────────────────────────────────────────┤
+│  To connect to your browser:                    │
+│  1. Start Chrome with:                          │
+│     chrome --remote-debugging-port=9222         │
+│  2. Log into Outlook in that Chrome             │
+│  3. Click "CDP Connect" in the dashboard        │
+│                                                 │
+│  Or install the extension from ./extension/     │
+└─────────────────────────────────────────────────┘
+`);
   });
 }
 
