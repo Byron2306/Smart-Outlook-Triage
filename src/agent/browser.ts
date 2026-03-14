@@ -101,15 +101,28 @@ export class BrowserManager extends EventEmitter {
    *
    * Then logs into Outlook in that Chrome. We connect and control it.
    */
-  async connectCDP(cdpUrl = "http://localhost:9222"): Promise<Page> {
+  async connectCDP(cdpUrl = "http://127.0.0.1:9222"): Promise<Page> {
     if (this._page && this._isRunning) {
       return this._page;
     }
 
     this._mode = "cdp";
+
+    const normalizedUrl = cdpUrl.replace("localhost", "127.0.0.1");
+
+    const reachable = await this.checkCDPReachable(normalizedUrl);
+    if (!reachable) {
+      throw new Error(
+        `Cannot reach Chrome at ${normalizedUrl}. ` +
+        `Make sure Chrome is running with --remote-debugging-port=9222. ` +
+        `Important: close ALL Chrome windows first, then reopen with the flag. ` +
+        `If Chrome was already running, it silently ignores the flag.`
+      );
+    }
+
     this.emit("status", { type: "browser", status: "connecting_cdp" });
 
-    this.browser = await chromium.connectOverCDP(cdpUrl);
+    this.browser = await chromium.connectOverCDP(normalizedUrl);
 
     const contexts = this.browser.contexts();
     if (contexts.length === 0) {
@@ -294,6 +307,71 @@ export class BrowserManager extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  private async checkCDPReachable(url: string): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`${url}/json/version`, { signal: controller.signal });
+      clearTimeout(timeout);
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async diagnoseCDP(url = "http://127.0.0.1:9222"): Promise<{
+    reachable: boolean;
+    version?: any;
+    tabs?: any[];
+    error?: string;
+    tips: string[];
+  }> {
+    const tips: string[] = [];
+    const normalizedUrl = url.replace("localhost", "127.0.0.1");
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const versionRes = await fetch(`${normalizedUrl}/json/version`, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (!versionRes.ok) {
+        tips.push("Chrome is responding but returned an error. Try restarting Chrome.");
+        return { reachable: false, tips, error: `HTTP ${versionRes.status}` };
+      }
+
+      const version = await versionRes.json();
+
+      const tabsRes = await fetch(`${normalizedUrl}/json/list`);
+      const tabs = await tabsRes.json();
+
+      const outlookTabs = tabs.filter((t: any) =>
+        t.url?.includes("outlook.live.com") ||
+        t.url?.includes("outlook.office.com") ||
+        t.url?.includes("outlook.office365.com")
+      );
+
+      if (outlookTabs.length === 0) {
+        tips.push("Chrome is connected but no Outlook tab found. Open outlook.live.com in that Chrome window.");
+      }
+
+      return {
+        reachable: true,
+        version: { browser: version.Browser, v8: version["V8-Version"] },
+        tabs: tabs.map((t: any) => ({ title: t.title, url: t.url })),
+        tips,
+      };
+    } catch (err: any) {
+      tips.push("Chrome is not reachable on port 9222.");
+      tips.push("Make sure to CLOSE ALL Chrome windows first, then reopen with:");
+      tips.push("  chrome --remote-debugging-port=9222");
+      tips.push("If Chrome was already running when you added the flag, it silently ignores it.");
+      tips.push("On macOS: /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222");
+      tips.push("On Windows: chrome.exe --remote-debugging-port=9222");
+      return { reachable: false, error: err.message, tips };
+    }
   }
 
   async close(): Promise<void> {

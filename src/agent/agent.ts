@@ -85,7 +85,11 @@ export class OutlookAgent extends EventEmitter {
    * This is the recommended approach — stealthiest possible
    * because it IS the user's real browser.
    */
-  async connectCDP(cdpUrl = "http://localhost:9222"): Promise<void> {
+  async diagnoseCDP(cdpUrl = "http://127.0.0.1:9222"): Promise<any> {
+    return this.browser.diagnoseCDP(cdpUrl);
+  }
+
+  async connectCDP(cdpUrl = "http://127.0.0.1:9222"): Promise<void> {
     this.emitUpdate("info", `Connecting to Chrome at ${cdpUrl}...`);
     try {
       const page = await this.browser.connectCDP(cdpUrl);

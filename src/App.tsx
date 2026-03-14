@@ -52,7 +52,8 @@ function App() {
     currentEmail: null, isLoggedIn: false, pageInfo: null, profile: null, recentPapers: [],
   });
 
-  const [cdpUrl, setCdpUrl] = useState("http://localhost:9222");
+  const [cdpUrl, setCdpUrl] = useState("http://127.0.0.1:9222");
+  const [cdpDiag, setCdpDiag] = useState<any>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [goal, setGoal] = useState("");
@@ -217,15 +218,47 @@ function App() {
                 className="flex-1 px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500" />
               <button onClick={() => agentApi("connect-cdp", { cdpUrl })}
                 className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition flex items-center gap-1.5">
-                <Link className="w-3.5 h-3.5" /> CDP Connect
+                <Link className="w-3.5 h-3.5" /> Connect
               </button>
             </div>
 
-            {isConnected && (
-              <button onClick={() => handleAction("find_outlook_tab")}
-                className="w-full py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs transition flex items-center justify-center gap-1 mb-2">
-                <Search className="w-3 h-3" /> Find Outlook Tab
+            <div className="flex gap-1.5 mb-2">
+              <button onClick={async () => {
+                const r = await agentApi("diagnose-cdp", { cdpUrl });
+                setCdpDiag(r);
+              }} className="flex-1 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
+                <Search className="w-3 h-3" /> Test Connection
               </button>
+              {isConnected && (
+                <button onClick={() => handleAction("find_outlook_tab")}
+                  className="flex-1 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
+                  <Eye className="w-3 h-3" /> Find Outlook Tab
+                </button>
+              )}
+            </div>
+
+            {cdpDiag && (
+              <div className={`p-2.5 rounded-lg text-[10px] mb-2 ${cdpDiag.reachable ? "bg-green-950/30 border border-green-900/50" : "bg-red-950/30 border border-red-900/50"}`}>
+                {cdpDiag.reachable ? (
+                  <div>
+                    <div className="text-green-400 font-medium mb-1">Chrome found: {cdpDiag.version?.browser}</div>
+                    <div className="text-slate-400">{cdpDiag.tabs?.length} tab(s) open:</div>
+                    <ul className="text-slate-500 ml-2 mt-0.5 space-y-0.5">
+                      {cdpDiag.tabs?.slice(0, 5).map((t: any, i: number) => (
+                        <li key={i} className={t.url?.includes("outlook") ? "text-blue-400" : ""}>
+                          {t.title?.slice(0, 50)} — {t.url?.slice(0, 60)}
+                        </li>
+                      ))}
+                    </ul>
+                    {cdpDiag.tips?.map((t: string, i: number) => <div key={i} className="text-amber-400 mt-1">{t}</div>)}
+                  </div>
+                ) : (
+                  <div>
+                    <div className="text-red-400 font-medium mb-1">Chrome not reachable</div>
+                    {cdpDiag.tips?.map((t: string, i: number) => <div key={i} className="text-slate-400 mt-0.5">{t}</div>)}
+                  </div>
+                )}
+              </div>
             )}
 
             <div className="border-t border-slate-800 pt-2 mt-2">

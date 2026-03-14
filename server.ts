@@ -113,10 +113,20 @@ async function startServer() {
   // --- Browser Connection ---
 
   app.post("/api/agent/connect-cdp", async (req, res) => {
-    const cdpUrl = req.body.cdpUrl || "http://localhost:9222";
+    const cdpUrl = req.body.cdpUrl || "http://127.0.0.1:9222";
     try {
       await agent.connectCDP(cdpUrl);
       res.json({ success: true, message: `Connected to Chrome at ${cdpUrl}` });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agent/diagnose-cdp", async (req, res) => {
+    const cdpUrl = req.body.cdpUrl || "http://127.0.0.1:9222";
+    try {
+      const result = await agent.diagnoseCDP(cdpUrl);
+      res.json(result);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
