@@ -6,21 +6,37 @@ import { EventEmitter } from "events";
 const USER_DATA_DIR = path.resolve("browser-profile");
 const SESSION_DIR = path.resolve("playwright-session");
 
+export type ConnectionMode = "cdp" | "standalone" | "extension";
+
+export interface ConnectionInfo {
+  mode: ConnectionMode;
+  cdpUrl?: string;
+  extensionPort?: number;
+}
+
 /**
- * Uses launchPersistentContext to maintain a real Chrome profile directory.
- * This is the key to surviving Microsoft login — persistent profiles carry
- * all cookies, localStorage, IndexedDB, and service workers across restarts,
- * just like a real user's browser. No storageState dance needed.
+ * Three connection modes:
  *
- * First login should be HEADED so the user can handle 2FA/CAPTCHAs manually.
- * After that, the saved profile means future launches (even headless) stay logged in.
+ * 1. CDP ("Connect to My Browser") — The recommended way.
+ *    User starts their Chrome with --remote-debugging-port=9222,
+ *    logs into Outlook normally, and we connect to their live session.
+ *    Zero detection risk because it IS their real browser.
+ *    Session persists as long as Chrome is running.
+ *
+ * 2. Standalone — Launches a new Chromium instance (headless or headed).
+ *    Uses persistent profile dir + stealth scripts.
+ *    Requires a display for headed mode.
+ *
+ * 3. Extension — The agent serves a WebSocket that a Chrome extension
+ *    connects to. The extension injects content scripts into Outlook
+ *    and relays actions. (Handled separately via the extension relay.)
  */
 export class BrowserManager extends EventEmitter {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
   private _page: Page | null = null;
   private _isRunning = false;
-  private _headless = true;
+  private _mode: ConnectionMode = "standalone";
 
   get page(): Page | null {
     return this._page;
@@ -30,11 +46,17 @@ export class BrowserManager extends EventEmitter {
     return this._isRunning;
   }
 
+  get mode(): ConnectionMode {
+    return this._mode;
+  }
+
   private stealthScripts(): string {
     return `
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 
-      window.navigator.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {} };
+      if (!window.navigator.chrome) {
+        window.navigator.chrome = { runtime: {}, loadTimes: () => {}, csi: () => {} };
+      }
 
       const originalQuery = window.navigator.permissions.query;
       window.navigator.permissions.query = (parameters) =>
@@ -64,12 +86,81 @@ export class BrowserManager extends EventEmitter {
     `;
   }
 
+  /**
+   * Connect to the user's already-running Chrome via CDP.
+   * This is the primary recommended method.
+   *
+   * The user launches Chrome with:
+   *   chrome --remote-debugging-port=9222
+   *
+   * Or on macOS:
+   *   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222
+   *
+   * Or on Windows:
+   *   chrome.exe --remote-debugging-port=9222
+   *
+   * Then logs into Outlook in that Chrome. We connect and control it.
+   */
+  async connectCDP(cdpUrl = "http://localhost:9222"): Promise<Page> {
+    if (this._page && this._isRunning) {
+      return this._page;
+    }
+
+    this._mode = "cdp";
+    this.emit("status", { type: "browser", status: "connecting_cdp" });
+
+    this.browser = await chromium.connectOverCDP(cdpUrl);
+
+    const contexts = this.browser.contexts();
+    if (contexts.length === 0) {
+      throw new Error("No browser contexts found. Is Chrome running with --remote-debugging-port?");
+    }
+
+    this.context = contexts[0];
+    const pages = this.context.pages();
+
+    let outlookPage = pages.find(
+      (p) =>
+        p.url().includes("outlook.live.com") ||
+        p.url().includes("outlook.office.com") ||
+        p.url().includes("outlook.office365.com")
+    );
+
+    if (!outlookPage && pages.length > 0) {
+      outlookPage = pages[0];
+    }
+
+    if (!outlookPage) {
+      outlookPage = await this.context.newPage();
+    }
+
+    this._page = outlookPage;
+    this._isRunning = true;
+
+    this._page.on("close", () => {
+      if (this.context && this.context.pages().length === 0) {
+        this._isRunning = false;
+        this.emit("status", { type: "browser", status: "page_closed" });
+      }
+    });
+
+    const url = this._page.url();
+    const title = await this._page.title();
+    this.emit("status", {
+      type: "browser",
+      status: `connected_cdp`,
+      detail: `Connected to ${title} (${url})`,
+    });
+
+    return this._page;
+  }
+
   async launch(headless = true): Promise<Page> {
     if (this._page && this._isRunning) {
       return this._page;
     }
 
-    this._headless = headless;
+    this._mode = "standalone";
     await fs.mkdir(USER_DATA_DIR, { recursive: true });
     await fs.mkdir(SESSION_DIR, { recursive: true });
 
@@ -128,9 +219,11 @@ export class BrowserManager extends EventEmitter {
   }
 
   async saveSessionBackup(): Promise<void> {
+    if (this._mode === "cdp") return;
     try {
       const state = await this.context?.storageState();
       if (state) {
+        await fs.mkdir(SESSION_DIR, { recursive: true });
         await fs.writeFile(
           path.join(SESSION_DIR, "state-backup.json"),
           JSON.stringify(state, null, 2)
@@ -161,13 +254,68 @@ export class BrowserManager extends EventEmitter {
     }
   }
 
+  async findOutlookTab(): Promise<boolean> {
+    if (!this.context) return false;
+    const pages = this.context.pages();
+    const outlookPage = pages.find(
+      (p) =>
+        p.url().includes("outlook.live.com") ||
+        p.url().includes("outlook.office.com") ||
+        p.url().includes("outlook.office365.com")
+    );
+    if (outlookPage) {
+      this._page = outlookPage;
+      this.emit("status", { type: "browser", status: "switched_to_outlook_tab" });
+      return true;
+    }
+    return false;
+  }
+
+  async listTabs(): Promise<{ index: number; url: string; title: string }[]> {
+    if (!this.context) return [];
+    const pages = this.context.pages();
+    const tabs = [];
+    for (let i = 0; i < pages.length; i++) {
+      tabs.push({
+        index: i,
+        url: pages[i].url(),
+        title: await pages[i].title().catch(() => ""),
+      });
+    }
+    return tabs;
+  }
+
+  async switchToTab(index: number): Promise<boolean> {
+    if (!this.context) return false;
+    const pages = this.context.pages();
+    if (index >= 0 && index < pages.length) {
+      this._page = pages[index];
+      await this._page.bringToFront();
+      return true;
+    }
+    return false;
+  }
+
   async close(): Promise<void> {
     await this.saveSessionBackup();
-    if (this.context) await this.context.close().catch(() => {});
+    if (this._mode === "cdp") {
+      if (this.browser) await this.browser.close().catch(() => {});
+    } else {
+      if (this.context) await this.context.close().catch(() => {});
+    }
     this._page = null;
     this.context = null;
     this.browser = null;
     this._isRunning = false;
     this.emit("status", { type: "browser", status: "closed" });
+  }
+
+  async disconnect(): Promise<void> {
+    this._page = null;
+    this.context = null;
+    if (this.browser) await this.browser.close().catch(() => {});
+    this.browser = null;
+    this._isRunning = false;
+    this.emit("status", { type: "browser", status: "disconnected" });
   }
 }

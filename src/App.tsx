@@ -3,8 +3,9 @@ import {
   Bot, Mail, Play, Square, LogIn, Send, FolderOpen, Search,
   ScrollText, Eye, Trash2, CheckCheck, Sparkles, RefreshCw,
   Monitor, Terminal, ArrowDown, ArrowUp, Power, Zap,
-  User, BookOpen, Brain, FileText, Globe, Plus, Save,
-  MonitorUp, MonitorOff, AlertCircle, ChevronDown,
+  User, BookOpen, Brain, FileText, Globe, Save,
+  MonitorUp, MonitorOff, Link, Unlink, ChevronDown,
+  Plug, ExternalLink, Copy,
 } from "lucide-react";
 
 interface AgentLog {
@@ -28,7 +29,8 @@ interface UserProfile {
 }
 
 interface AgentState {
-  status: "idle" | "running" | "paused" | "error" | "awaiting_login";
+  status: string;
+  connectionMode: string;
   currentGoal: string | null; logs: AgentLog[]; emails: EmailSummary[];
   currentEmail: any; isLoggedIn: boolean;
   pageInfo: { url: string; title: string } | null;
@@ -46,11 +48,11 @@ type Tab = "logs" | "emails" | "screenshot" | "profile" | "research" | "memory";
 
 function App() {
   const [state, setState] = useState<AgentState>({
-    status: "idle", currentGoal: null, logs: [], emails: [],
-    currentEmail: null, isLoggedIn: false, pageInfo: null,
-    profile: null, recentPapers: [],
+    status: "idle", connectionMode: "none", currentGoal: null, logs: [], emails: [],
+    currentEmail: null, isLoggedIn: false, pageInfo: null, profile: null, recentPapers: [],
   });
 
+  const [cdpUrl, setCdpUrl] = useState("http://localhost:9222");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [goal, setGoal] = useState("");
@@ -63,7 +65,7 @@ function App() {
   const [researchQuery, setResearchQuery] = useState("");
   const [researchResults, setResearchResults] = useState<any>(null);
   const [memory, setMemory] = useState<any[]>([]);
-  const [sidebarSection, setSidebarSection] = useState<"connection" | "agent" | "actions" | "custom">("connection");
+  const [openSections, setOpenSections] = useState<Set<string>>(new Set(["connect"]));
 
   const wsRef = useRef<WebSocket | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -94,37 +96,30 @@ function App() {
   };
 
   const agentApi = (endpoint: string, body?: any) => api(`agent/${endpoint}`, body);
-
   const fetchProfile = async () => {
     const p = await api("profile", undefined, "GET");
     if (p && !p.error) setProfileForm({ ...DEFAULT_PROFILE, ...p });
   };
-
   const saveProfileForm = async () => {
     await api("profile", profileForm);
     setState((prev) => ({ ...prev, profile: profileForm }));
   };
-
   const fetchMemory = async () => {
     const m = await api("memory?limit=50", undefined, "GET");
     if (Array.isArray(m)) setMemory(m);
   };
-
   const handleAction = (action: string, params?: any) => agentApi("action", { action, params });
-
   const handleSearchPapers = async () => {
     if (!researchQuery) return;
     const r = await agentApi("action", { action: "search_papers", params: { query: researchQuery } });
     setResearchResults(r?.result);
   };
-
   const refreshScreenshot = async () => {
     try {
       const res = await fetch("/api/agent/screenshot");
       if (res.ok) { const blob = await res.blob(); setScreenshotUrl(URL.createObjectURL(blob)); }
     } catch {}
   };
-
   const handleCustomAction = () => {
     if (!customAction) return;
     let params;
@@ -132,6 +127,16 @@ function App() {
     catch { params = { value: actionParams }; }
     handleAction(customAction, params);
   };
+
+  const toggleSection = (id: string) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const copyText = (text: string) => navigator.clipboard.writeText(text);
 
   const logColors: Record<string, string> = {
     action: "text-blue-400", result: "text-green-400", error: "text-red-400",
@@ -142,15 +147,14 @@ function App() {
     error: "bg-red-500", awaiting_login: "bg-orange-500 animate-pulse",
   };
 
-  const SidebarSection = ({ id, title, icon, children }: { id: string; title: string; icon: React.ReactNode; children: React.ReactNode }) => (
-    <section className="bg-slate-900 rounded-xl border border-slate-800">
-      <button onClick={() => setSidebarSection(sidebarSection === id ? id : id as any)} className="w-full p-3 flex items-center justify-between text-left">
-        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">{icon} {title}</span>
-        <ChevronDown className={`w-3.5 h-3.5 text-slate-500 transition ${sidebarSection === id ? "rotate-180" : ""}`} />
-      </button>
-      {<div className={`px-3 pb-3 space-y-2 ${sidebarSection === id ? "" : "hidden"}`}>{children}</div>}
-    </section>
-  );
+  const modeLabels: Record<string, string> = {
+    none: "Not connected",
+    cdp: "CDP (Your Chrome)",
+    standalone: "Standalone Chromium",
+    extension: "Chrome Extension",
+  };
+
+  const isConnected = state.connectionMode !== "none";
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -162,73 +166,122 @@ function App() {
             <div>
               <h1 className="text-lg font-bold tracking-tight">Outlook Browser Agent</h1>
               <p className="text-xs text-slate-500">
-                Agentic automation · Playwright + PinchTab + Gemini — no OAuth
+                {modeLabels[state.connectionMode] || "Not connected"}
                 {state.profile?.name && <span className="text-blue-400"> · {state.profile.name}</span>}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <span className={`inline-block w-2.5 h-2.5 rounded-full ${statusColors[state.status]}`} />
+            <span className={`inline-block w-2.5 h-2.5 rounded-full ${statusColors[state.status] || "bg-slate-500"}`} />
             <span className="text-sm text-slate-400 capitalize">{state.status}</span>
-            <span className={`text-xs px-2 py-0.5 rounded-full ${connected ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"}`}>
-              {connected ? "Connected" : "Disconnected"}
+            {state.isLoggedIn && <span className="text-xs px-2 py-0.5 rounded-full bg-green-900 text-green-300">Outlook ✓</span>}
+            <span className={`text-xs px-2 py-0.5 rounded-full ${connected ? "bg-blue-900 text-blue-300" : "bg-red-900 text-red-300"}`}>
+              {connected ? "WS" : "No WS"}
             </span>
           </div>
         </div>
       </header>
 
-      <div className="max-w-[1800px] mx-auto p-4 grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-4">
+      <div className="max-w-[1800px] mx-auto p-4 grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-4">
         {/* Sidebar */}
         <aside className="space-y-3">
-          <SidebarSection id="connection" title="Connection" icon={<Power className="w-4 h-4" />}>
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={() => agentApi("start")} className="py-2 px-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1">
-                <Zap className="w-3.5 h-3.5" /> Headless
-              </button>
-              <button onClick={() => agentApi("start-headed")} className="py-2 px-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1">
-                <MonitorUp className="w-3.5 h-3.5" /> Headed
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <button onClick={() => agentApi("switch-headed")} className="py-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
-                <Monitor className="w-3 h-3" /> Show Browser
-              </button>
-              <button onClick={() => agentApi("switch-headless")} className="py-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
-                <MonitorOff className="w-3 h-3" /> Hide Browser
-              </button>
-            </div>
-            <button onClick={() => agentApi("check-session")} className="w-full py-1.5 px-3 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs transition flex items-center justify-center gap-1">
-              <RefreshCw className="w-3.5 h-3.5" /> Check Session
-            </button>
-            <div className="bg-slate-800/50 rounded-lg p-2 mt-1">
-              <div className="flex items-center gap-1 mb-2 text-[10px] text-amber-400">
-                <AlertCircle className="w-3 h-3" />
-                First time? Use "Headed" to log in manually. Session persists.
+          {/* CDP Connect — Primary method */}
+          <Section id="connect" title="Connect to Your Browser" icon={<Plug className="w-4 h-4" />} open={openSections.has("connect")} toggle={() => toggleSection("connect")} highlight>
+            <div className="bg-blue-950/30 border border-blue-900/50 rounded-lg p-3 mb-3">
+              <p className="text-[10px] text-blue-300 leading-relaxed mb-2">
+                <strong>Recommended:</strong> Connect to your own Chrome where you're already logged into Outlook. Zero detection risk — it IS your real browser.
+              </p>
+              <div className="space-y-1.5 text-[10px] text-slate-400">
+                <p className="font-medium text-slate-300">1. Close Chrome completely, then reopen with:</p>
+                <div className="flex gap-1">
+                  <code className="flex-1 bg-slate-800 px-2 py-1.5 rounded text-[9px] text-green-400 font-mono block">
+                    chrome --remote-debugging-port=9222
+                  </code>
+                  <button onClick={() => copyText("chrome --remote-debugging-port=9222")} className="px-1.5 bg-slate-700 hover:bg-slate-600 rounded transition" title="Copy">
+                    <Copy className="w-3 h-3" />
+                  </button>
+                </div>
+                <p className="text-[9px] text-slate-500">
+                  macOS: <code className="text-[8px]">/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222</code>
+                </p>
+                <p className="text-[9px] text-slate-500">
+                  Windows: <code className="text-[8px]">chrome.exe --remote-debugging-port=9222</code>
+                </p>
+                <p className="font-medium text-slate-300 mt-1">2. Log into Outlook in that Chrome</p>
+                <p className="font-medium text-slate-300">3. Click "CDP Connect" below</p>
               </div>
-              <input type="email" placeholder="Outlook email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 mb-1.5" />
-              <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 mb-1.5" />
+            </div>
+
+            <div className="flex gap-2 mb-2">
+              <input value={cdpUrl} onChange={(e) => setCdpUrl(e.target.value)}
+                className="flex-1 px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500" />
+              <button onClick={() => agentApi("connect-cdp", { cdpUrl })}
+                className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition flex items-center gap-1.5">
+                <Link className="w-3.5 h-3.5" /> CDP Connect
+              </button>
+            </div>
+
+            {isConnected && (
+              <button onClick={() => handleAction("find_outlook_tab")}
+                className="w-full py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs transition flex items-center justify-center gap-1 mb-2">
+                <Search className="w-3 h-3" /> Find Outlook Tab
+              </button>
+            )}
+
+            <div className="border-t border-slate-800 pt-2 mt-2">
+              <p className="text-[9px] text-slate-600 mb-1.5">Alternative: Chrome Extension</p>
+              <div className="flex gap-1.5">
+                <a href="https://github.com/Byron2306/Smart-Outlook-Triage/tree/main/extension" target="_blank" rel="noopener"
+                  className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 border border-slate-700/50 rounded-lg text-[10px] transition flex items-center justify-center gap-1 text-slate-400">
+                  <ExternalLink className="w-3 h-3" /> Extension Guide
+                </a>
+                <button onClick={() => agentApi("check-session")}
+                  className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 border border-slate-700/50 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
+                  <RefreshCw className="w-3 h-3" /> Check Session
+                </button>
+              </div>
+            </div>
+          </Section>
+
+          {/* Fallback: Standalone browser */}
+          <Section id="standalone" title="Standalone Browser (Fallback)" icon={<Monitor className="w-4 h-4" />} open={openSections.has("standalone")} toggle={() => toggleSection("standalone")}>
+            <p className="text-[10px] text-slate-500 mb-2">Launch a separate Chromium. Needs a display for headed mode. Less stealthy than CDP.</p>
+            <div className="grid grid-cols-2 gap-1.5 mb-2">
+              <button onClick={() => agentApi("start")} className="py-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
+                <MonitorOff className="w-3 h-3" /> Headless
+              </button>
+              <button onClick={() => agentApi("start-headed")} className="py-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center justify-center gap-1">
+                <MonitorUp className="w-3 h-3" /> Headed
+              </button>
+            </div>
+            <div className="space-y-1.5">
+              <input type="email" placeholder="Outlook email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500" />
+              <input type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500" />
               <button onClick={() => agentApi("login", { email, password })} className="w-full py-1.5 px-3 bg-violet-600 hover:bg-violet-700 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1">
                 <LogIn className="w-3.5 h-3.5" /> Auto Login
               </button>
             </div>
-            {state.isLoggedIn && <div className="text-xs text-green-400 flex items-center gap-1"><CheckCheck className="w-3 h-3" /> Logged in</div>}
-          </SidebarSection>
+          </Section>
 
-          <SidebarSection id="agent" title="Autonomous Agent" icon={<Sparkles className="w-4 h-4" />}>
-            <textarea placeholder='"Read my unread emails and summarize them with priorities based on my work"' value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className="w-full px-2.5 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 resize-none" />
-            <div className="flex gap-2">
-              <button onClick={() => goal && agentApi("run", { goal })} disabled={state.status === "running"} className="flex-1 py-2 px-3 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-700 disabled:opacity-50 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1">
+          {/* Autonomous Agent */}
+          <Section id="agent" title="Autonomous Agent" icon={<Sparkles className="w-4 h-4" />} open={openSections.has("agent")} toggle={() => toggleSection("agent")}>
+            <textarea placeholder='"Read my unread emails and summarize them with priorities"' value={goal} onChange={(e) => setGoal(e.target.value)} rows={3}
+              className="w-full px-2.5 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 resize-none" />
+            <div className="flex gap-2 mt-1.5">
+              <button onClick={() => goal && agentApi("run", { goal })} disabled={state.status === "running"}
+                className="flex-1 py-2 px-3 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-700 disabled:opacity-50 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1">
                 <Play className="w-3.5 h-3.5" /> Run
               </button>
               <button onClick={() => agentApi("stop")} className="py-2 px-3 bg-red-700 hover:bg-red-600 rounded-lg text-xs font-medium transition flex items-center justify-center gap-1">
                 <Square className="w-3.5 h-3.5" /> Stop
               </button>
             </div>
-            {state.currentGoal && <div className="text-xs text-violet-300 bg-violet-900/30 p-2 rounded-md">Goal: {state.currentGoal}</div>}
-          </SidebarSection>
+            {state.currentGoal && <div className="mt-2 text-xs text-violet-300 bg-violet-900/30 p-2 rounded-md">Goal: {state.currentGoal}</div>}
+          </Section>
 
-          <SidebarSection id="actions" title="Quick Actions" icon={<Zap className="w-4 h-4" />}>
-            <div className="grid grid-cols-2 gap-1.5">
+          {/* Quick Actions */}
+          <Section id="actions" title="Quick Actions" icon={<Zap className="w-4 h-4" />} open={openSections.has("actions")} toggle={() => toggleSection("actions")}>
+            <div className="grid grid-cols-2 gap-1">
               <Btn icon={<Mail className="w-3 h-3" />} label="Get Emails" onClick={() => handleAction("get_email_list")} />
               <Btn icon={<Eye className="w-3 h-3" />} label="Read Email" onClick={() => handleAction("read_email")} />
               <Btn icon={<FolderOpen className="w-3 h-3" />} label="Folders" onClick={() => handleAction("get_folders")} />
@@ -246,22 +299,22 @@ function App() {
               <Btn icon={<Globe className="w-3 h-3" />} label="Page Text" onClick={() => handleAction("get_page_text")} />
               <Btn icon={<Search className="w-3 h-3" />} label="Page Info" onClick={() => handleAction("page_info")} />
             </div>
-          </SidebarSection>
+          </Section>
 
-          <SidebarSection id="custom" title="Custom Action" icon={<Terminal className="w-4 h-4" />}>
+          {/* Custom Action */}
+          <Section id="custom" title="Custom Action" icon={<Terminal className="w-4 h-4" />} open={openSections.has("custom")} toggle={() => toggleSection("custom")}>
             <input placeholder="Action name" value={customAction} onChange={(e) => setCustomAction(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500" />
-            <input placeholder='Params JSON, e.g. {"index": 0}' value={actionParams} onChange={(e) => setActionParams(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500" />
-            <button onClick={handleCustomAction} className="w-full py-1.5 px-3 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs transition">Execute</button>
-          </SidebarSection>
+            <input placeholder='Params JSON' value={actionParams} onChange={(e) => setActionParams(e.target.value)} className="w-full px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs focus:outline-none focus:border-blue-500 mt-1.5" />
+            <button onClick={handleCustomAction} className="w-full py-1.5 px-3 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs transition mt-1.5">Execute</button>
+          </Section>
 
-          <button onClick={() => agentApi("shutdown")} className="w-full py-2 px-3 bg-red-900/50 hover:bg-red-900 border border-red-800 rounded-lg text-xs text-red-300 transition">
-            Shutdown Agent
+          <button onClick={() => agentApi("shutdown")} className="w-full py-2 px-3 bg-red-900/50 hover:bg-red-900 border border-red-800 rounded-lg text-xs text-red-300 transition flex items-center justify-center gap-1">
+            <Unlink className="w-3.5 h-3.5" /> Disconnect & Shutdown
           </button>
         </aside>
 
         {/* Main Content */}
         <main className="space-y-3">
-          {/* Tabs */}
           <div className="flex gap-0.5 bg-slate-900 rounded-xl border border-slate-800 p-1 overflow-x-auto">
             {(["logs", "emails", "screenshot", "profile", "research", "memory"] as Tab[]).map((tab) => (
               <button key={tab} onClick={() => {
@@ -275,11 +328,10 @@ function App() {
             ))}
           </div>
 
-          {/* Logs */}
           {activeTab === "logs" && (
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 h-[calc(100vh-180px)] overflow-y-auto font-mono text-[11px]">
               {state.logs.length === 0 ? (
-                <Empty icon={<Bot className="w-10 h-10" />} text='No activity yet. Use "Headed" to launch a visible browser for first-time login.' />
+                <Empty icon={<Bot className="w-10 h-10" />} text='Start Chrome with --remote-debugging-port=9222, log into Outlook, then click "CDP Connect".' />
               ) : state.logs.map((log, i) => (
                 <div key={i} className="py-1 border-b border-slate-800/50 flex gap-2">
                   <span className="text-slate-600 shrink-0 w-16">{new Date(log.timestamp).toLocaleTimeString()}</span>
@@ -296,11 +348,10 @@ function App() {
             </div>
           )}
 
-          {/* Emails */}
           {activeTab === "emails" && (
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 h-[calc(100vh-180px)] overflow-y-auto">
               {state.emails.length === 0 ? (
-                <Empty icon={<Mail className="w-10 h-10" />} text='Click "Get Emails" to load your inbox.' />
+                <Empty icon={<Mail className="w-10 h-10" />} text='Connect to your browser and click "Get Emails".' />
               ) : (
                 <div className="space-y-1.5">
                   {state.emails.map((em, i) => (
@@ -334,7 +385,6 @@ function App() {
             </div>
           )}
 
-          {/* Screenshot */}
           {activeTab === "screenshot" && (
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 h-[calc(100vh-180px)] overflow-y-auto">
               <div className="flex justify-between items-center mb-3">
@@ -348,14 +398,13 @@ function App() {
             </div>
           )}
 
-          {/* Profile */}
           {activeTab === "profile" && (
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 h-[calc(100vh-180px)] overflow-y-auto">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2"><User className="w-4 h-4 text-blue-400" /> Your Profile</h3>
                 <button onClick={saveProfileForm} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition flex items-center gap-1"><Save className="w-3.5 h-3.5" /> Save</button>
               </div>
-              <p className="text-[10px] text-slate-500 mb-4">This is how the agent knows you. Fill this out so it can write in your voice, understand your relationships, and prioritize your work.</p>
+              <p className="text-[10px] text-slate-500 mb-4">This is how the agent knows you. It uses this to write in your voice, understand relationships, and prioritize your work.</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <Field label="Full Name" value={profileForm.name} onChange={(v) => setProfileForm({ ...profileForm, name: v })} />
                 <Field label="Email" value={profileForm.email} onChange={(v) => setProfileForm({ ...profileForm, email: v })} />
@@ -364,9 +413,7 @@ function App() {
                 <Field label="Department" value={profileForm.department} onChange={(v) => setProfileForm({ ...profileForm, department: v })} />
                 <Field label="Student Number" value={profileForm.studentNumber || ""} onChange={(v) => setProfileForm({ ...profileForm, studentNumber: v })} />
               </div>
-              <div className="mt-3">
-                <Field label="Bio / About You" value={profileForm.bio} onChange={(v) => setProfileForm({ ...profileForm, bio: v })} multiline />
-              </div>
+              <div className="mt-3"><Field label="Bio / About You" value={profileForm.bio} onChange={(v) => setProfileForm({ ...profileForm, bio: v })} multiline /></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
                 <Field label="Expertise (comma-separated)" value={profileForm.expertise.join(", ")} onChange={(v) => setProfileForm({ ...profileForm, expertise: v.split(",").map((s) => s.trim()).filter(Boolean) })} />
                 <Field label="Current Projects (comma-separated)" value={profileForm.currentProjects.join(", ")} onChange={(v) => setProfileForm({ ...profileForm, currentProjects: v.split(",").map((s) => s.trim()).filter(Boolean) })} />
@@ -376,16 +423,11 @@ function App() {
                 <Field label="Sign-off" value={profileForm.communication.signOff} onChange={(v) => setProfileForm({ ...profileForm, communication: { ...profileForm.communication, signOff: v } })} />
                 <Field label="Language" value={profileForm.communication.language} onChange={(v) => setProfileForm({ ...profileForm, communication: { ...profileForm.communication, language: v } })} />
               </div>
-              <div className="mt-3">
-                <Field label="Custom Folders (comma-separated)" value={profileForm.customFolders.join(", ")} onChange={(v) => setProfileForm({ ...profileForm, customFolders: v.split(",").map((s) => s.trim()).filter(Boolean) })} />
-              </div>
-              <div className="mt-3">
-                <Field label="Additional Notes / Context" value={profileForm.notes} onChange={(v) => setProfileForm({ ...profileForm, notes: v })} multiline />
-              </div>
+              <div className="mt-3"><Field label="Custom Folders (comma-separated)" value={profileForm.customFolders.join(", ")} onChange={(v) => setProfileForm({ ...profileForm, customFolders: v.split(",").map((s) => s.trim()).filter(Boolean) })} /></div>
+              <div className="mt-3"><Field label="Additional Notes / Context" value={profileForm.notes} onChange={(v) => setProfileForm({ ...profileForm, notes: v })} multiline /></div>
             </div>
           )}
 
-          {/* Research */}
           {activeTab === "research" && (
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 h-[calc(100vh-180px)] overflow-y-auto">
               <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2 mb-3"><BookOpen className="w-4 h-4 text-blue-400" /> Research Papers</h3>
@@ -402,7 +444,7 @@ function App() {
                       <div className="text-[10px] text-slate-500 mt-1">{p.authors?.join(", ")} · {p.year} {p.venue && `· ${p.venue}`}</div>
                       {p.citationCount != null && <div className="text-[10px] text-slate-600 mt-0.5">{p.citationCount} citations</div>}
                       {p.abstract && <div className="text-[10px] text-slate-400 mt-1.5 line-clamp-3">{p.abstract}</div>}
-                      {p.pdfUrl && <a href={p.pdfUrl} target="_blank" rel="noopener" className="text-[10px] text-green-400 hover:underline mt-1 inline-block">PDF Available</a>}
+                      {p.pdfUrl && <a href={p.pdfUrl} target="_blank" rel="noopener" className="text-[10px] text-green-400 hover:underline mt-1 inline-block">PDF</a>}
                     </div>
                   ))}
                 </div>
@@ -410,14 +452,13 @@ function App() {
             </div>
           )}
 
-          {/* Memory */}
           {activeTab === "memory" && (
             <div className="bg-slate-900 rounded-xl border border-slate-800 p-4 h-[calc(100vh-180px)] overflow-y-auto">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold text-slate-300 flex items-center gap-2"><Brain className="w-4 h-4 text-blue-400" /> Agent Memory</h3>
                 <button onClick={fetchMemory} className="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded-lg text-[10px] transition flex items-center gap-1"><RefreshCw className="w-3 h-3" /> Refresh</button>
               </div>
-              <p className="text-[10px] text-slate-500 mb-3">The agent remembers email interactions, decisions, and context. This builds situational awareness over time.</p>
+              <p className="text-[10px] text-slate-500 mb-3">Situational awareness: the agent records interactions, context, and decisions over time.</p>
               {memory.length === 0 ? (
                 <Empty icon={<Brain className="w-10 h-10" />} text="No memories yet. The agent records interactions automatically." />
               ) : (
@@ -439,6 +480,21 @@ function App() {
         </main>
       </div>
     </div>
+  );
+}
+
+function Section({ id, title, icon, children, open, toggle, highlight }: {
+  id: string; title: string; icon: React.ReactNode; children: React.ReactNode;
+  open: boolean; toggle: () => void; highlight?: boolean;
+}) {
+  return (
+    <section className={`rounded-xl border ${highlight ? "bg-slate-900 border-blue-900/50" : "bg-slate-900 border-slate-800"}`}>
+      <button onClick={toggle} className="w-full p-3 flex items-center justify-between text-left">
+        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">{icon} {title}</span>
+        <ChevronDown className={`w-3.5 h-3.5 text-slate-500 transition ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && <div className="px-3 pb-3 space-y-2">{children}</div>}
+    </section>
   );
 }
 

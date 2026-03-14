@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { BrowserManager } from "./browser.js";
+import { BrowserManager, ConnectionMode } from "./browser.js";
 import { OutlookAutomation, EmailSummary, EmailFull } from "./outlook.js";
 import * as gemini from "../ai/gemini.js";
 import * as research from "../knowledge/research.js";
@@ -14,6 +14,7 @@ export interface AgentLog {
 
 export interface AgentState {
   status: "idle" | "running" | "paused" | "error" | "awaiting_login";
+  connectionMode: ConnectionMode | "none";
   currentGoal: string | null;
   logs: AgentLog[];
   emails: EmailSummary[];
@@ -29,6 +30,7 @@ export class OutlookAgent extends EventEmitter {
   private outlook: OutlookAutomation | null = null;
   private state: AgentState = {
     status: "idle",
+    connectionMode: "none",
     currentGoal: null,
     logs: [],
     emails: [],
@@ -45,7 +47,9 @@ export class OutlookAgent extends EventEmitter {
   constructor() {
     super();
     this.browser = new BrowserManager();
-    this.browser.on("status", (data) => this.emitUpdate("info", data.status));
+    this.browser.on("status", (data) => {
+      this.emitUpdate("info", data.detail || data.status);
+    });
     this.loadProfileState();
   }
 
@@ -76,10 +80,44 @@ export class OutlookAgent extends EventEmitter {
     this.addLog(type, message, data);
   }
 
+  /**
+   * Connect to the user's existing Chrome via CDP.
+   * This is the recommended approach — stealthiest possible
+   * because it IS the user's real browser.
+   */
+  async connectCDP(cdpUrl = "http://localhost:9222"): Promise<void> {
+    this.emitUpdate("info", `Connecting to Chrome at ${cdpUrl}...`);
+    try {
+      const page = await this.browser.connectCDP(cdpUrl);
+      this.outlook = new OutlookAutomation(page);
+      this.state.connectionMode = "cdp";
+      this.state.status = "idle";
+
+      const url = page.url();
+      const isOutlook =
+        url.includes("outlook.live.com") ||
+        url.includes("outlook.office.com") ||
+        url.includes("outlook.office365.com");
+      this.state.isLoggedIn = isOutlook;
+
+      this.emitUpdate(
+        "info",
+        isOutlook
+          ? "Connected to your Chrome — Outlook tab found and ready!"
+          : `Connected to your Chrome — current page: ${url}. Navigate to Outlook or use 'navigate_to_outlook'.`
+      );
+    } catch (err: any) {
+      this.state.status = "error";
+      this.emitUpdate("error", `CDP connection failed: ${err.message}`);
+      throw err;
+    }
+  }
+
   async start(headless = true): Promise<void> {
-    this.emitUpdate("info", `Launching browser (${headless ? "headless" : "headed"})...`);
+    this.emitUpdate("info", `Launching standalone browser (${headless ? "headless" : "headed"})...`);
     const page = await this.browser.launch(headless);
     this.outlook = new OutlookAutomation(page);
+    this.state.connectionMode = "standalone";
     this.state.status = "idle";
     this.emitUpdate("info", "Browser launched, ready for commands");
   }
@@ -103,7 +141,7 @@ export class OutlookAgent extends EventEmitter {
       this.state.status = "awaiting_login";
       this.emitUpdate(
         "error",
-        "Login may have been blocked. Try 'Launch Headed' to log in manually with a visible browser, then 'Switch to Headless' once logged in."
+        "Login may have been blocked. Use CDP mode instead: start Chrome with --remote-debugging-port=9222, log in manually, then connect."
       );
     }
 
@@ -111,16 +149,19 @@ export class OutlookAgent extends EventEmitter {
   }
 
   async checkSession(): Promise<boolean> {
-    if (!this.outlook) await this.start();
+    if (!this.outlook) {
+      this.emitUpdate("error", "Not connected to any browser. Use CDP Connect or Launch first.");
+      return false;
+    }
 
-    await this.outlook!.navigateToOutlook();
-    const loggedIn = await this.outlook!.isLoggedIn();
+    await this.outlook.navigateToOutlook();
+    const loggedIn = await this.outlook.isLoggedIn();
     this.state.isLoggedIn = loggedIn;
 
     if (loggedIn) {
       this.emitUpdate("info", "Session is active, logged into Outlook");
     } else {
-      this.emitUpdate("info", "Not logged in — use 'Launch Headed' for first-time login");
+      this.emitUpdate("info", "Not logged in to Outlook");
       this.state.status = "awaiting_login";
     }
 
@@ -131,19 +172,38 @@ export class OutlookAgent extends EventEmitter {
     this.emitUpdate("info", "Switching to headless mode (preserving session)...");
     const page = await this.browser.relaunchHeadless();
     this.outlook = new OutlookAutomation(page);
-    this.emitUpdate("info", "Now running headless. Session should be preserved from headed login.");
+    this.state.connectionMode = "standalone";
+    this.emitUpdate("info", "Now running headless.");
   }
 
   async switchToHeaded(): Promise<void> {
     this.emitUpdate("info", "Switching to headed mode...");
     const page = await this.browser.relaunchHeaded();
     this.outlook = new OutlookAutomation(page);
-    this.emitUpdate("info", "Running in headed mode — you can see and interact with the browser.");
+    this.state.connectionMode = "standalone";
+    this.emitUpdate("info", "Running in headed mode.");
+  }
+
+  async findOutlookTab(): Promise<boolean> {
+    const found = await this.browser.findOutlookTab();
+    if (found && this.browser.page) {
+      this.outlook = new OutlookAutomation(this.browser.page);
+      this.state.isLoggedIn = true;
+      this.emitUpdate("info", "Found and switched to Outlook tab");
+    } else {
+      this.emitUpdate("info", "No Outlook tab found in browser");
+    }
+    return found;
+  }
+
+  async listTabs(): Promise<any[]> {
+    return this.browser.listTabs();
   }
 
   async executeAction(action: string, params?: Record<string, any>): Promise<any> {
-    if (!this.outlook && action !== "update_profile" && action !== "get_profile" && action !== "recall") {
-      throw new Error("Agent not started — launch browser first");
+    const noConnectionNeeded = ["update_profile", "get_profile", "recall", "search_papers", "get_author_papers"];
+    if (!this.outlook && !noConnectionNeeded.includes(action)) {
+      throw new Error("Not connected. Use 'CDP Connect' to connect to your browser, or 'Launch' to start a new one.");
     }
 
     this.emitUpdate("action", `Executing: ${action}`, params);
@@ -240,42 +300,30 @@ export class OutlookAgent extends EventEmitter {
           result = await this.outlook!.markAsRead();
           break;
 
-        case "get_folders": {
+        case "get_folders":
           result = await this.outlook!.getFolders();
           break;
-        }
 
-        case "classify_email": {
-          if (!this.state.currentEmail) {
-            result = { error: "No email currently open" };
-            break;
-          }
+        case "classify_email":
+          if (!this.state.currentEmail) { result = { error: "No email currently open" }; break; }
           result = await gemini.classifyEmail(
             this.state.currentEmail.from,
             this.state.currentEmail.subject,
             this.state.currentEmail.body.slice(0, 500)
           );
           break;
-        }
 
-        case "generate_draft": {
-          if (!this.state.currentEmail) {
-            result = { error: "No email currently open" };
-            break;
-          }
+        case "generate_draft":
+          if (!this.state.currentEmail) { result = { error: "No email currently open" }; break; }
           result = await gemini.generateDraft(
             this.state.currentEmail.from,
             this.state.currentEmail.subject,
             this.state.currentEmail.body.slice(0, 2000)
           );
           break;
-        }
 
-        case "analyze_context": {
-          if (!this.state.currentEmail) {
-            result = { error: "No email currently open" };
-            break;
-          }
+        case "analyze_context":
+          if (!this.state.currentEmail) { result = { error: "No email currently open" }; break; }
           result = await gemini.analyzeEmailContext(
             this.state.currentEmail.from,
             this.state.currentEmail.subject,
@@ -288,19 +336,15 @@ export class OutlookAgent extends EventEmitter {
             tags: [this.state.currentEmail.from, this.state.currentEmail.subject],
           });
           break;
-        }
 
         case "summarize_inbox": {
           if (this.state.emails.length === 0) {
             const emails = await this.outlook!.getEmailList(15);
             this.state.emails = emails;
           }
-          const emailData = this.state.emails.map((e) => ({
-            from: e.from,
-            subject: e.subject,
-            preview: e.preview,
-          }));
-          result = await gemini.summarizeEmails(emailData);
+          result = await gemini.summarizeEmails(
+            this.state.emails.map((e) => ({ from: e.from, subject: e.subject, preview: e.preview }))
+          );
           break;
         }
 
@@ -324,12 +368,11 @@ export class OutlookAgent extends EventEmitter {
           break;
         }
 
-        case "scout_web": {
+        case "scout_web":
           result = await research.scoutWebPresence(params?.name || "", this.browser.page || undefined);
           break;
-        }
 
-        case "remember": {
+        case "remember":
           await profile.addMemory({
             type: (params?.type as any) || "context",
             summary: params?.summary || "",
@@ -338,31 +381,25 @@ export class OutlookAgent extends EventEmitter {
           });
           result = { saved: true };
           break;
-        }
 
-        case "recall": {
-          const memories = await profile.searchMemory(params?.query || "", params?.limit || 10);
-          result = memories;
+        case "recall":
+          result = await profile.searchMemory(params?.query || "", params?.limit || 10);
           break;
-        }
 
-        case "learn_contact": {
+        case "learn_contact":
           if (params?.email && params?.name) {
             await profile.upsertContact({
-              name: params.name,
-              email: params.email,
+              name: params.name, email: params.email,
               relationship: params.relationship || "unknown",
-              context: params.context || "",
-              notes: params.notes || "",
+              context: params.context || "", notes: params.notes || "",
             });
             result = { saved: true };
           } else {
             result = { error: "Need at least name and email" };
           }
           break;
-        }
 
-        case "navigate_to_url": {
+        case "navigate_to_url":
           if (this.browser.page && params?.url) {
             await this.browser.page.goto(params.url, { waitUntil: "domcontentloaded", timeout: 20000 });
             await this.browser.page.waitForTimeout(2000);
@@ -371,38 +408,34 @@ export class OutlookAgent extends EventEmitter {
             result = { error: "No page or URL" };
           }
           break;
-        }
 
-        case "fill_form": {
-          if (!this.browser.page) {
-            result = { error: "No page available" };
-            break;
-          }
-          const pageText = await this.browser.getPageText();
+        case "fill_form":
+          if (!this.browser.page) { result = { error: "No page available" }; break; }
           result = await gemini.analyzeDocumentForFilling(
-            pageText.slice(0, 3000),
+            (await this.browser.getPageText()).slice(0, 3000),
             params?.context || ""
           );
           break;
-        }
 
-        case "fill_field": {
-          if (!this.browser.page) {
-            result = { error: "No page available" };
-            break;
-          }
-          const selector = params?.selector || "";
-          const value = params?.value || "";
+        case "fill_field":
+          if (!this.browser.page) { result = { error: "No page available" }; break; }
           try {
-            const el = this.browser.page.locator(selector).first();
+            const el = this.browser.page.locator(params?.selector || "").first();
             await el.click();
-            await el.fill(value);
-            result = { filled: true, selector, value };
+            await el.fill(params?.value || "");
+            result = { filled: true };
           } catch (err: any) {
-            result = { error: `Could not fill "${selector}": ${err.message}` };
+            result = { error: err.message };
           }
           break;
-        }
+
+        case "find_outlook_tab":
+          result = await this.findOutlookTab();
+          break;
+
+        case "list_tabs":
+          result = await this.listTabs();
+          break;
 
         case "update_profile": {
           const current = await profile.loadProfile();
@@ -413,11 +446,10 @@ export class OutlookAgent extends EventEmitter {
           break;
         }
 
-        case "get_profile": {
+        case "get_profile":
           result = await profile.loadProfile();
           this.state.profile = result;
           break;
-        }
 
         case "screenshot": {
           const buf = await this.browser.screenshot();
@@ -432,11 +464,9 @@ export class OutlookAgent extends EventEmitter {
           break;
         }
 
-        case "get_page_text": {
-          result = await this.browser.getPageText();
-          result = (result as string).slice(0, 5000);
+        case "get_page_text":
+          result = (await this.browser.getPageText()).slice(0, 5000);
           break;
-        }
 
         default:
           result = { error: `Unknown action: ${action}` };
@@ -452,7 +482,10 @@ export class OutlookAgent extends EventEmitter {
   }
 
   async runAutonomous(goal: string): Promise<void> {
-    if (!this.outlook) await this.start();
+    if (!this.outlook) {
+      this.emitUpdate("error", "Not connected. Connect first, then run autonomous goals.");
+      return;
+    }
 
     this.state.status = "running";
     this.state.currentGoal = goal;
@@ -470,13 +503,7 @@ export class OutlookAgent extends EventEmitter {
         const pageText = await this.browser.getPageText();
         const currentState = `URL: ${pageInfo.url}\nTitle: ${pageInfo.title}\nVisible content (truncated): ${pageText.slice(0, 3000)}`;
 
-        const decision = await gemini.decideNextAction(
-          currentState,
-          goal,
-          this.actionHistory,
-          extraCtx
-        );
-
+        const decision = await gemini.decideNextAction(currentState, goal, this.actionHistory, extraCtx);
         this.emitUpdate("decision", `Step ${step + 1}: ${decision.action} — ${decision.reasoning}`);
 
         if (decision.action === "done") {
@@ -521,6 +548,7 @@ export class OutlookAgent extends EventEmitter {
   async shutdown(): Promise<void> {
     this.stop();
     await this.browser.close();
+    this.state.connectionMode = "none";
     this.emitUpdate("info", "Agent shut down");
   }
 
