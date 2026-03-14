@@ -1,0 +1,7 @@
+node_modules/
+dist/
+playwright-session/
+.env
+.env.local
+*.log
+smoketest_results.json

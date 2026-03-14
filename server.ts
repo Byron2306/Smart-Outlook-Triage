@@ -1,185 +1,140 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import session from "express-session";
-import cookieParser from "cookie-parser";
-import axios from "axios";
+import { WebSocketServer, WebSocket } from "ws";
+import http from "http";
 import path from "path";
 import { fileURLToPath } from "url";
-
-// Extend express-session
-declare module "express-session" {
-  interface SessionData {
-    accessToken: string;
-  }
-}
+import { OutlookAgent } from "./src/agent/agent.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "3000");
 
-  app.use(express.json());
-  app.use(cookieParser());
-  app.use(
-    session({
-      secret: process.env.SESSION_SECRET || "a-very-secret-key",
-      resave: false,
-      saveUninitialized: false,
-      cookie: {
-        secure: true,
-        sameSite: "none",
-        httpOnly: true,
-      },
-    })
-  );
+  app.use(express.json({ limit: "10mb" }));
 
-  // --- OAuth Configuration ---
-  const CLIENT_ID = process.env.MS_CLIENT_ID;
-  const CLIENT_SECRET = process.env.MS_CLIENT_SECRET;
-  const REDIRECT_URI = `${process.env.APP_URL}/auth/callback`;
-  const AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
-  const TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
-  const SCOPES = "openid profile email User.Read Mail.Read Mail.ReadWrite Mail.Send";
+  const server = http.createServer(app);
+  const wss = new WebSocketServer({ server, path: "/ws" });
 
-  // --- API Routes ---
+  const agent = new OutlookAgent();
+  const clients = new Set<WebSocket>();
 
-  app.get("/api/auth/url", (req, res) => {
-    if (!CLIENT_ID) {
-      return res.status(500).json({ error: "MS_CLIENT_ID not configured" });
+  function broadcast(type: string, data: any) {
+    const msg = JSON.stringify({ type, data, timestamp: Date.now() });
+    for (const ws of clients) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(msg);
+      }
     }
-    const params = new URLSearchParams({
-      client_id: CLIENT_ID,
-      response_type: "code",
-      redirect_uri: REDIRECT_URI,
-      response_mode: "query",
-      scope: SCOPES,
-      state: "12345",
-    });
-    res.json({ url: `${AUTH_URL}?${params.toString()}` });
-  });
+  }
 
-  app.get("/auth/callback", async (req, res) => {
-    const { code } = req.query;
-    if (!code) {
-      return res.status(400).send("No code provided");
-    }
+  agent.on("log", (log) => broadcast("log", log));
+  agent.on("state", (state) => broadcast("state", state));
 
-    try {
-      const response = await axios.post(
-        TOKEN_URL,
-        new URLSearchParams({
-          client_id: CLIENT_ID!,
-          client_secret: CLIENT_SECRET!,
-          code: code as string,
-          redirect_uri: REDIRECT_URI,
-          grant_type: "authorization_code",
-        }).toString(),
-        {
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
+  wss.on("connection", (ws) => {
+    clients.add(ws);
+    ws.send(JSON.stringify({ type: "state", data: agent.getState(), timestamp: Date.now() }));
+
+    ws.on("close", () => clients.delete(ws));
+
+    ws.on("message", async (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "action") {
+          const result = await agent.executeAction(msg.action, msg.params);
+          ws.send(JSON.stringify({ type: "action_result", action: msg.action, data: result, timestamp: Date.now() }));
         }
-      );
-
-      const { access_token, refresh_token } = response.data;
-      req.session.accessToken = access_token;
-      
-      res.send(`
-        <html>
-          <body>
-            <script>
-              if (window.opener) {
-                window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-                window.close();
-              } else {
-                window.location.href = '/';
-              }
-            </script>
-            <p>Authentication successful. This window should close automatically.</p>
-          </body>
-        </html>
-      `);
-    } catch (error: any) {
-      console.error("Token exchange error:", error.response?.data || error.message);
-      res.status(500).send("Authentication failed");
-    }
+      } catch (err: any) {
+        ws.send(JSON.stringify({ type: "error", data: err.message, timestamp: Date.now() }));
+      }
+    });
   });
 
-  app.get("/api/user/me", async (req, res) => {
-    const token = req.session.accessToken;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  app.post("/api/agent/start", async (_req, res) => {
     try {
-      const response = await axios.get("https://graph.microsoft.com/v1.0/me", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      res.json(response.data);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch user info" });
+      await agent.start();
+      res.json({ success: true, message: "Agent started" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.get("/api/mail/folders", async (req, res) => {
-    const token = req.session.accessToken;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  app.post("/api/agent/login", async (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password required" });
+    }
     try {
-      const response = await axios.get("https://graph.microsoft.com/v1.0/me/mailFolders", {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      res.json(response.data.value);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch folders" });
+      const success = await agent.login(email, password);
+      res.json({ success, message: success ? "Logged in" : "Login failed - check credentials or 2FA" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.post("/api/mail/folders/create", async (req, res) => {
-    const token = req.session.accessToken;
-    const { displayName } = req.body;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  app.post("/api/agent/check-session", async (_req, res) => {
     try {
-      const response = await axios.post(
-        "https://graph.microsoft.com/v1.0/me/mailFolders",
-        { displayName },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      res.json(response.data);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to create folder" });
+      const loggedIn = await agent.checkSession();
+      res.json({ loggedIn });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.get("/api/mail/messages", async (req, res) => {
-    const token = req.session.accessToken;
-    if (!token) return res.status(401).json({ error: "Not authenticated" });
-
+  app.post("/api/agent/action", async (req, res) => {
+    const { action, params } = req.body;
+    if (!action) {
+      return res.status(400).json({ error: "Action required" });
+    }
     try {
-      const response = await axios.get(
-        "https://graph.microsoft.com/v1.0/me/messages?$top=10&$select=subject,from,receivedDateTime,bodyPreview,id",
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      res.json(response.data.value);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch messages" });
+      const result = await agent.executeAction(action, params);
+      res.json({ success: true, result });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  app.post("/api/reports/save", async (req, res) => {
-    const { report } = req.body;
+  app.post("/api/agent/run", async (req, res) => {
+    const { goal } = req.body;
+    if (!goal) {
+      return res.status(400).json({ error: "Goal required" });
+    }
+    res.json({ success: true, message: `Started autonomous run: ${goal}` });
+    agent.runAutonomous(goal).catch((err) => {
+      broadcast("error", { message: err.message });
+    });
+  });
+
+  app.post("/api/agent/stop", async (_req, res) => {
+    agent.stop();
+    res.json({ success: true, message: "Agent stopped" });
+  });
+
+  app.get("/api/agent/state", (_req, res) => {
+    res.json(agent.getState());
+  });
+
+  app.get("/api/agent/screenshot", async (_req, res) => {
     try {
-      const fs = await import("fs/promises");
-      await fs.writeFile("smoketest_results.json", JSON.stringify(report, null, 2));
-      res.json({ success: true, message: "Report saved to smoketest_results.json" });
-    } catch (error) {
-      console.error("Failed to save report:", error);
-      res.status(500).json({ error: "Failed to save report" });
+      const buf = await agent.getScreenshot();
+      if (buf) {
+        res.type("image/jpeg").send(buf);
+      } else {
+        res.status(404).json({ error: "No screenshot available" });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
-  // --- Vite Middleware ---
+  app.post("/api/agent/shutdown", async (_req, res) => {
+    await agent.shutdown();
+    res.json({ success: true, message: "Agent shut down" });
+  });
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -188,13 +143,14 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(__dirname, "dist", "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Outlook Agent running on http://localhost:${PORT}`);
+    console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
   });
 }
 
