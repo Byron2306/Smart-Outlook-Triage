@@ -172,10 +172,10 @@ async function startServer() {
   // --- Auth ---
 
   app.post("/api/agent/login", async (req, res) => {
-    const { email, password } = req.body;
+    const { email, password, username } = req.body;
     if (!email || !password) return res.status(400).json({ error: "Email and password required" });
     try {
-      const success = await agent.login(email, password);
+      const success = await agent.login(email, password, username);
       res.json({ success });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
