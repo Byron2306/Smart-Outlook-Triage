@@ -7,3 +7,4 @@ agent-data/
 .env.local
 *.log
 smoketest_results.json
+.server.pid

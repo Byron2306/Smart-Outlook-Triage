@@ -13,22 +13,44 @@ This isn't just an email automator. It **understands who you are**, knows your w
 - A **Gemini API key** for AI features — [get one free](https://aistudio.google.com/apikey)
 - **Microsoft Authenticator** on your phone (for NWU MFA approval)
 
-### Step 1: Install Dependencies
+### One-Click Setup
+
+The fastest way to get everything running:
 
 ```bash
-# Clone the repo and install Node packages
 git clone https://github.com/Byron2306/Smart-Outlook-Triage.git
 cd Smart-Outlook-Triage
-npm install
+chmod +x setup.sh
+./setup.sh
+```
 
-# Install Playwright's Chromium browser
+The installer will prompt for your credentials, install everything, start the server, launch the browser, log into Outlook, and open the dashboard. Approve the MFA on your phone when prompted.
+
+You can also pass credentials as environment variables for non-interactive use:
+
+```bash
+GEMINI_API_KEY="your-key" \
+OUTLOOK_EMAIL="name@nwu.ac.za" \
+OUTLOOK_PASSWORD="your-password" \
+NWU_USERNAME="20172672" \
+./setup.sh
+```
+
+### Manual Setup
+
+If you prefer to set up step by step:
+
+#### Step 1: Install Dependencies
+
+```bash
+npm install
 npm run install-browsers
 
-# On Linux, you may also need Playwright's system dependencies:
+# On Linux, also install system dependencies:
 npx playwright install-deps chromium
 ```
 
-### Step 2: Configure Environment
+#### Step 2: Configure Environment
 
 ```bash
 cp env.example .env.local
