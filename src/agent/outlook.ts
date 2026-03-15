@@ -174,29 +174,22 @@ export class OutlookAutomation {
       return true;
     }
 
-    const usePasswordLink = this.page.locator('#redirectToIdpLink, a:has-text("Use your password instead")');
-    const hasUsePassword = await usePasswordLink.first().isVisible({ timeout: 1000 }).catch(() => false);
-    if (hasUsePassword) {
-      this.log("Clicking 'Use your password instead'...");
-      await usePasswordLink.first().click();
-      await this.page.waitForTimeout(3000);
-      return true;
-    }
-
-    const cantUseApp = this.page.locator('a:has-text("I can\'t use my Microsoft Authenticator app right now")');
-    const hasCantUse = await cantUseApp.first().isVisible({ timeout: 1000 }).catch(() => false);
-    if (hasCantUse) {
-      this.log("Clicking 'I can't use my Microsoft Authenticator app right now'...");
-      await cantUseApp.first().click();
-      await this.page.waitForTimeout(3000);
-      return true;
-    }
-
     const pageText = await this.page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
-    if (pageText.includes("Approve sign in") || pageText.includes("Approve sign in request")) {
+
+    if (pageText.includes("Approve sign in") || pageText.includes("Approve sign in request") || pageText.includes("Enter the number if prompted")) {
       const numberMatch = pageText.match(/\b(\d{2})\b/);
       const code = numberMatch ? numberMatch[1] : "??";
-      this.log(`Waiting for Authenticator approval (code: ${code})... Please approve on your phone.`);
+      this.log(`⏳ Waiting for Authenticator approval (code: ${code})... Please approve on your phone.`);
+
+      const usePasswordLink = this.page.locator('#redirectToIdpLink, a:has-text("Use your password instead")');
+      const hasUsePassword = await usePasswordLink.first().isVisible({ timeout: 1000 }).catch(() => false);
+      if (hasUsePassword) {
+        this.log("'Use your password instead' available — clicking to bypass Authenticator for federated login...");
+        await usePasswordLink.first().click();
+        await this.page.waitForTimeout(3000);
+        return true;
+      }
+
       await this.waitForMFAApproval(120000);
       return true;
     }
@@ -204,6 +197,15 @@ export class OutlookAutomation {
     if (pageText.includes("Taking you to your organization")) {
       this.log("Redirecting to organization sign-in...");
       await this.page.waitForTimeout(5000);
+      return true;
+    }
+
+    const cantUseApp = this.page.locator('a:has-text("I can\'t use my Microsoft Authenticator app right now")');
+    const hasCantUse = await cantUseApp.first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (hasCantUse) {
+      this.log("On MFA page without approval prompt text — clicking 'I can't use my app'...");
+      await cantUseApp.first().click();
+      await this.page.waitForTimeout(3000);
       return true;
     }
 
