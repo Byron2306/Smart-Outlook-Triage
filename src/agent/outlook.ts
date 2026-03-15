@@ -108,13 +108,15 @@ export class OutlookAutomation {
           continue;
         }
 
-        if (url.includes("adfs.ms.nwu.ac.za")) {
-          await this.handleADFSPage();
+        const hostname = new URL(url).hostname;
+
+        if (hostname === "casprd.nwu.ac.za") {
+          await this.handleCASLoginPage(username || email, password);
           continue;
         }
 
-        if (url.includes("casprd.nwu.ac.za") || url.includes("/cas/login")) {
-          await this.handleCASLoginPage(username || email, password);
+        if (hostname === "adfs.ms.nwu.ac.za") {
+          await this.handleADFSPage();
           continue;
         }
 
