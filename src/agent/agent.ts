@@ -130,11 +130,11 @@ export class OutlookAgent extends EventEmitter {
     return this.start(false);
   }
 
-  async login(email: string, password: string): Promise<boolean> {
+  async login(email: string, password: string, username?: string): Promise<boolean> {
     if (!this.outlook) await this.start();
 
     this.emitUpdate("action", "Logging into Outlook...");
-    const success = await this.outlook!.login(email, password);
+    const success = await this.outlook!.login(email, password, username);
 
     if (success) {
       this.state.isLoggedIn = true;

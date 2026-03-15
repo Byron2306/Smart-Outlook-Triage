@@ -23,8 +23,8 @@ export interface OutlookFolder {
   unreadCount?: number;
 }
 
-const OUTLOOK_URL = "https://outlook.live.com/mail/0/";
-const OUTLOOK_OFFICE_URL = "https://outlook.office.com/mail/";
+const OUTLOOK_URL = "https://outlook.office.com/mail/";
+const OUTLOOK_LIVE_URL = "https://outlook.live.com/mail/0/";
 
 export class OutlookAutomation {
   constructor(private page: Page) {}
@@ -51,57 +51,273 @@ export class OutlookAutomation {
   async isLoggedIn(): Promise<boolean> {
     try {
       const url = this.page.url();
-      if (url.includes("login.microsoftonline.com") || url.includes("login.live.com")) {
+      if (
+        url.includes("login.microsoftonline.com") ||
+        url.includes("login.live.com") ||
+        url.includes("adfs.ms.nwu.ac.za") ||
+        url.includes("casprd.nwu.ac.za")
+      ) {
         return false;
       }
-      const mailView = await this.page
-        .locator('[role="main"], [data-app-section="ConversationContainer"], [aria-label*="Mail"], [aria-label*="message list"]')
-        .first()
-        .isVisible({ timeout: 5000 })
-        .catch(() => false);
-      return !!mailView;
+      if (
+        url.includes("outlook.office.com") ||
+        url.includes("outlook.live.com/mail")
+      ) {
+        const mailView = await this.page
+          .locator('[role="main"], [data-app-section="ConversationContainer"], [aria-label*="Mail"], [aria-label*="message list"]')
+          .first()
+          .isVisible({ timeout: 5000 })
+          .catch(() => false);
+        return !!mailView;
+      }
+      return false;
     } catch {
       return false;
     }
   }
 
-  async login(email: string, password: string): Promise<boolean> {
+  async login(email: string, password: string, username?: string): Promise<boolean> {
     this.log("Starting login flow...");
     try {
-      await this.page.goto("https://login.live.com/", {
+      await this.page.goto(OUTLOOK_URL, {
         waitUntil: "domcontentloaded",
         timeout: 30000,
       });
-      await this.page.waitForTimeout(2000);
-
-      const emailInput = this.page.locator('input[type="email"], input[name="loginfmt"]');
-      await emailInput.waitFor({ state: "visible", timeout: 10000 });
-      await emailInput.fill(email);
-      await this.page.waitForTimeout(500);
-      await emailInput.press("Enter");
       await this.page.waitForTimeout(3000);
 
-      const passwordInput = this.page.locator('input[type="password"], input[name="passwd"]');
-      await passwordInput.waitFor({ state: "visible", timeout: 10000 });
-      await passwordInput.fill(password);
-      await this.page.waitForTimeout(500);
-      await passwordInput.press("Enter");
-      await this.page.waitForTimeout(3000);
+      if (await this.isLoggedIn()) {
+        this.log("Already logged in from persistent session");
+        return true;
+      }
 
-      const staySignedIn = this.page.locator('input[value="Yes"], button:has-text("Yes"), #idSIButton9');
-      const hasStaySignedIn = await staySignedIn.first().isVisible({ timeout: 5000 }).catch(() => false);
-      if (hasStaySignedIn) {
-        await staySignedIn.first().click();
+      const maxSteps = 25;
+      for (let step = 0; step < maxSteps; step++) {
+        const url = this.page.url();
+        this.log(`Login step ${step + 1}: ${url.split("?")[0]}`);
+
+        if (await this.isLoggedIn()) {
+          this.log("Login successful — Outlook inbox reached");
+          return true;
+        }
+
+        if (url.includes("login.microsoftonline.com") || url.includes("login.live.com")) {
+          const handled = await this.handleMicrosoftLoginPage(email, password);
+          if (!handled) {
+            await this.page.waitForTimeout(3000);
+          }
+          continue;
+        }
+
+        if (url.includes("adfs.ms.nwu.ac.za")) {
+          await this.handleADFSPage();
+          continue;
+        }
+
+        if (url.includes("casprd.nwu.ac.za") || url.includes("/cas/login")) {
+          await this.handleCASLoginPage(username || email, password);
+          continue;
+        }
+
+        if (url.includes("www.nwu.ac.za") || (url.includes("microsoft.com") && !url.includes("outlook.office.com") && !url.includes("login.microsoftonline.com"))) {
+          this.log("Redirected away from login flow — navigating back to Outlook...");
+          await this.page.goto(OUTLOOK_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await this.page.waitForTimeout(3000);
+          continue;
+        }
+
         await this.page.waitForTimeout(3000);
       }
 
-      await this.navigateToOutlook();
-      await this.page.waitForTimeout(5000);
       return await this.isLoggedIn();
     } catch (err) {
       this.log(`Login failed: ${err}`);
       return false;
     }
+  }
+
+  private async handleMicrosoftLoginPage(email: string, password: string): Promise<boolean> {
+    const url = this.page.url();
+
+    const staySignedIn = this.page.locator('#idSIButton9, input[value="Yes"]');
+    const hasStaySignedIn = await staySignedIn.first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (hasStaySignedIn) {
+      const title = await this.page.title();
+      if (title.includes("Stay signed in") || (await this.page.locator('text=Stay signed in').isVisible({ timeout: 500 }).catch(() => false))) {
+        this.log("Clicking 'Stay signed in' → Yes");
+        await staySignedIn.first().click();
+        await this.page.waitForTimeout(3000);
+        return true;
+      }
+    }
+
+    const emailInput = this.page.locator('input[type="email"], input[name="loginfmt"]');
+    const emailVisible = await emailInput.first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (emailVisible) {
+      this.log("Entering email address...");
+      await emailInput.first().fill(email);
+      await this.page.waitForTimeout(500);
+      await emailInput.first().press("Enter");
+      await this.page.waitForTimeout(3000);
+      return true;
+    }
+
+    const passwordInput = this.page.locator('input[type="password"], input[name="passwd"]');
+    const passwordVisible = await passwordInput.first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (passwordVisible) {
+      this.log("Entering password...");
+      await passwordInput.first().fill(password);
+      await this.page.waitForTimeout(500);
+      await passwordInput.first().press("Enter");
+      await this.page.waitForTimeout(3000);
+      return true;
+    }
+
+    const usePasswordLink = this.page.locator('#redirectToIdpLink, a:has-text("Use your password instead")');
+    const hasUsePassword = await usePasswordLink.first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (hasUsePassword) {
+      this.log("Clicking 'Use your password instead'...");
+      await usePasswordLink.first().click();
+      await this.page.waitForTimeout(3000);
+      return true;
+    }
+
+    const cantUseApp = this.page.locator('a:has-text("I can\'t use my Microsoft Authenticator app right now")');
+    const hasCantUse = await cantUseApp.first().isVisible({ timeout: 1000 }).catch(() => false);
+    if (hasCantUse) {
+      this.log("Clicking 'I can't use my Microsoft Authenticator app right now'...");
+      await cantUseApp.first().click();
+      await this.page.waitForTimeout(3000);
+      return true;
+    }
+
+    const pageText = await this.page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+    if (pageText.includes("Approve sign in") || pageText.includes("Approve sign in request")) {
+      const numberMatch = pageText.match(/\b(\d{2})\b/);
+      const code = numberMatch ? numberMatch[1] : "??";
+      this.log(`Waiting for Authenticator approval (code: ${code})... Please approve on your phone.`);
+      await this.waitForMFAApproval(120000);
+      return true;
+    }
+
+    if (pageText.includes("Taking you to your organization")) {
+      this.log("Redirecting to organization sign-in...");
+      await this.page.waitForTimeout(5000);
+      return true;
+    }
+
+    return false;
+  }
+
+  private async waitForMFAApproval(timeoutMs = 120000): Promise<boolean> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+      await this.page.waitForTimeout(3000);
+      const url = this.page.url();
+      if (
+        url.includes("outlook.office.com") ||
+        url.includes("outlook.live.com/mail") ||
+        url.includes("adfs.ms.nwu.ac.za") ||
+        url.includes("casprd.nwu.ac.za") ||
+        url.includes("/SAS/ProcessAuth")
+      ) {
+        this.log("MFA approved — proceeding");
+        return true;
+      }
+      const pageText = await this.page.locator("body").innerText({ timeout: 2000 }).catch(() => "");
+      if (!pageText.includes("Approve sign in") && !pageText.includes("Enter the number")) {
+        this.log("MFA page changed — proceeding");
+        return true;
+      }
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      this.log(`Still waiting for MFA approval... (${elapsed}s)`);
+    }
+    this.log("MFA approval timed out");
+    return false;
+  }
+
+  private async handleADFSPage(): Promise<void> {
+    this.log("On NWU ADFS page — selecting NWU Single Sign-On...");
+    await this.page.waitForTimeout(2000);
+
+    const urlBefore = this.page.url();
+
+    const clicked = await this.page.evaluate(() => {
+      const allElements = document.querySelectorAll("a, span, div, td, img");
+      for (const el of allElements) {
+        const text = (el.textContent || "").trim();
+        const alt = el.getAttribute("alt") || "";
+        if (text === "NWU Single Sign-On" || alt.includes("NWU Single Sign-On")) {
+          const clickTarget = el.closest("a") || el.closest("[onclick]") || el;
+          (clickTarget as HTMLElement).click();
+          return "found-exact";
+        }
+      }
+      for (const el of allElements) {
+        const text = (el.textContent || "").trim();
+        if (text.includes("Single Sign-On") && !text.includes("Active Directory")) {
+          const clickTarget = el.closest("a") || el.closest("[onclick]") || el;
+          (clickTarget as HTMLElement).click();
+          return "found-partial";
+        }
+      }
+      return "not-found";
+    });
+
+    this.log(`ADFS click result: ${clicked}`);
+
+    if (clicked !== "not-found") {
+      await this.page.waitForTimeout(5000);
+      const urlAfter = this.page.url();
+      if (urlAfter !== urlBefore) {
+        this.log(`ADFS navigated to: ${urlAfter.split("?")[0]}`);
+        return;
+      }
+      this.log("ADFS click didn't navigate — trying form submission...");
+      await this.page.evaluate(() => {
+        const forms = document.querySelectorAll("form");
+        for (const form of forms) {
+          if (form.textContent?.includes("NWU Single Sign-On")) {
+            form.submit();
+            return;
+          }
+        }
+        const firstForm = document.querySelector("form");
+        if (firstForm) firstForm.submit();
+      });
+      await this.page.waitForTimeout(5000);
+    } else {
+      this.log("No NWU SSO element found on ADFS page");
+    }
+  }
+
+  private async handleCASLoginPage(username: string, password: string): Promise<void> {
+    this.log("On NWU CAS login page — entering credentials...");
+    await this.page.waitForTimeout(1000);
+
+    const usernameInput = this.page.locator('input[name="username"], input[id="username"]');
+    const usernameVisible = await usernameInput.first().isVisible({ timeout: 5000 }).catch(() => false);
+    if (usernameVisible) {
+      await usernameInput.first().fill(username);
+      await this.page.waitForTimeout(300);
+    }
+
+    const passwordInput = this.page.locator('input[name="password"], input[id="password"], input[type="password"]');
+    const passwordVisible = await passwordInput.first().isVisible({ timeout: 5000 }).catch(() => false);
+    if (passwordVisible) {
+      await passwordInput.first().fill(password);
+      await this.page.waitForTimeout(300);
+    }
+
+    const loginBtn = this.page.locator('input[name="submit"], input[type="submit"], button[type="submit"], input[value="LOGIN"]');
+    const btnVisible = await loginBtn.first().isVisible({ timeout: 3000 }).catch(() => false);
+    if (btnVisible) {
+      await loginBtn.first().click();
+      this.log("Submitted CAS credentials");
+    } else {
+      await passwordInput.first().press("Enter");
+      this.log("Pressed Enter to submit CAS form");
+    }
+    await this.page.waitForTimeout(5000);
   }
 
   async getEmailList(maxCount = 15): Promise<EmailSummary[]> {
