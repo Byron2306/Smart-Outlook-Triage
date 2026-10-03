@@ -14,6 +14,7 @@ const __dirname = path.dirname(__filename);
 async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || "3000");
+  const HOST = process.env.HOST || "127.0.0.1";
 
   app.use(express.json({ limit: "10mb" }));
 
@@ -172,6 +173,9 @@ async function startServer() {
   // --- Auth ---
 
   app.post("/api/agent/login", async (req, res) => {
+    if (process.env.ALLOW_PASSWORD_LOGIN !== "true") {
+      return res.status(403).json({ error: "Password login is disabled. Sign in interactively in headed mode or use Microsoft Graph OAuth." });
+    }
     const { email, password, username } = req.body;
     if (!email || !password) return res.status(400).json({ error: "Email and password required" });
     try {
@@ -277,12 +281,12 @@ async function startServer() {
     });
   }
 
-  server.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, HOST, () => {
     console.log(`
 ┌─────────────────────────────────────────────────┐
 │          Outlook Browser Agent                  │
 ├─────────────────────────────────────────────────┤
-│  Dashboard:  http://localhost:${PORT}              │
+│  Dashboard:  http://${HOST}:${PORT}              │
 │  WebSocket:  ws://localhost:${PORT}/ws              │
 │  Extension:  ws://localhost:${PORT}/ext             │
 │  PinchTab:   pinchtab (v0.7.8) available        │

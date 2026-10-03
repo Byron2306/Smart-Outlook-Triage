@@ -109,7 +109,7 @@ Natural language goals that leverage all capabilities:
 
 ### Manual Control
 Full set of quick actions for direct control:
-- Get/read/compose/reply/send emails
+- Get/read/compose/reply-draft emails. Final sending is reserved for the DIO Control Deck's exact-draft Microsoft Graph transport.
 - Navigate folders, scroll, search
 - Classify, draft, analyze context
 - Screenshot, page text, form filling

@@ -270,7 +270,11 @@ export class OutlookAgent extends EventEmitter {
           break;
 
         case "send_email":
-          result = await this.outlook!.sendEmail();
+          result = {
+            sent: false,
+            error: "SEND_AUTHORITY_REFUSED",
+            message: "Sending is reserved for the DIO Control Deck's exact-draft Microsoft Graph transport.",
+          };
           break;
 
         case "scroll_down":

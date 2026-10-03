@@ -363,7 +363,7 @@ export async function decideNextAction(
     - read_email: Read the currently open email fully
     - compose_email(to, subject, body): Compose a new email
     - reply_to_email(body): Reply to the currently open email
-    - send_email: Send the composed/reply email
+    - Sending is never autonomous. After composing a message, stop and report that operator approval is required.
     - scroll_down / scroll_up: Navigate the email list
     - navigate_to_folder(name): Go to a specific folder
     - search_emails(query): Search for emails

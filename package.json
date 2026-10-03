@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
     "install-browsers": "npx playwright install chromium"
   },
   "dependencies": {
